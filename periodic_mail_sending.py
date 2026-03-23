@@ -27,13 +27,6 @@ EXPORT_VARIANT_ID = "7F0000010175551BAE4736E652E83540"
 DOWNLOAD_DIR = Path("E:/bao-cao-ca")
 
 
-def prompt_report_url() -> str:
-    print("Type report URL here:")
-    report_url = input().strip()
-    if not report_url:
-        raise ValueError("Report URL không được để trống")
-    return report_url
-
 
 def parse_page_id(report_url: str) -> str:
     parsed = urlparse(report_url)
@@ -58,23 +51,35 @@ def create_edge_driver():
     return webdriver.Edge(options=options)
 
 
-def login_sso_and_get_jsessionid(report_url: str) -> str:
+def login_sso_and_get_session_info() -> tuple[str, str]:
     driver = create_edge_driver()
     try:
-        driver.get(report_url)
+        driver.get("https://confluence.viettelcyber.com")
 
         print("Cửa sổ Edge đã mở.")
-        input("Đăng nhập xong, nhấn Enter để tiếp tục ...")
+        print("Vui lòng đăng nhập SSO trên cửa sổ này, sau đó truy cập trang báo cáo cần export.")
+        input("Khi đã mở đúng trang báo cáo, nhấn Enter để tiếp tục ...")
 
-        WebDriverWait(driver, 30).until(lambda d: len(d.get_cookies()) > 0)
+        report_url = driver.current_url
+        if not report_url or "pageId=" not in report_url:
+            raise ValueError(
+                f"URL hiện tại không hợp lệ hoặc không chứa pageId: {report_url}"
+            )
 
-        cookie = driver.get_cookie("JSESSIONID")
+        WebDriverWait(driver, 30).until(
+            lambda d: d.get_cookie("JSESSIONID") is not None
+            or d.get_cookie("jsessionid") is not None
+        )
+
+        cookie = driver.get_cookie("JSESSIONID") or driver.get_cookie("jsessionid")
         if not cookie or "value" not in cookie:
             raise ValueError("Không lấy được JSESSIONID sau khi đăng nhập SSO.")
 
         jsessionid = cookie["value"]
 
-        return jsessionid
+        print(f"Current report URL: {report_url}")
+
+        return report_url, jsessionid
 
     finally:
         driver.quit()
@@ -339,10 +344,9 @@ def send_handover_email(
 
 
 def run():
-    report_url = prompt_report_url()
+    report_url, jsessionid = login_sso_and_get_session_info()
     page_id = parse_page_id(report_url)
 
-    jsessionid = login_sso_and_get_jsessionid(report_url)
     session = create_requests_session(jsessionid)
 
     html = fetch_report_html(session, report_url)
@@ -360,6 +364,15 @@ def run():
 
     receivers = [
         "anhlmv@os.viettel.com.vn",
+        # "halq1@viettel.com.vn",
+        # "thuannt84@viettel.com.vn",
+        # "tiepvv@viettel.com.vn",
+        # "tanpv5@viettel.com.vn",
+        # "namth8@viettel.com.vn",
+        # "chungnh3@viettel.com.vn",
+        # "thaiph5@viettel.com.vn",
+        # "noc_cloudrity@viettel.com.vn",
+        # "noc_vcs@viettel.com.vn",
     ]
 
     job_id = start_export_job(session, page_id)
