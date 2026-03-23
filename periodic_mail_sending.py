@@ -14,7 +14,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from datetime import datetime, timedelta, timezone
 
-os.environ["SE_PROXY"] = "http:192.168.5.8:3128"
+os.environ["SE_PROXY"] = "http://192.168.5.8:3128"
 
 BANGKOK_TZ = timezone(timedelta(hours=7))
 USER_AGENT = (
@@ -28,8 +28,6 @@ EXPORT_TEMPLATE_ID = "4e9c2265-c90e-456a-a5d7-5c7fe09342e5"
 EXPORT_VARIANT_ID = "7F0000010175551BAE4736E652E83540"
 DOWNLOAD_DIR = Path("E:/bao-cao-ca")
 
-
-
 def parse_page_id(report_url: str) -> str:
     parsed = urlparse(report_url)
     query = parse_qs(parsed.query)
@@ -37,7 +35,6 @@ def parse_page_id(report_url: str) -> str:
     if not page_ids:
         raise ValueError("Missing pageId trong URL")
     return page_ids[0]
-
 
 def create_requests_session(jsessionid: str) -> requests.Session:
     session = requests.Session()
@@ -51,7 +48,6 @@ def create_edge_driver():
     options.add_argument("--log-level=3")
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
     return webdriver.Edge(options=options)
-
 
 def login_sso_and_get_session_info() -> tuple[str, str]:
     driver = create_edge_driver()
@@ -86,12 +82,10 @@ def login_sso_and_get_session_info() -> tuple[str, str]:
     finally:
         driver.quit()
 
-
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
     resp = session.get(report_url, timeout=60)
     resp.raise_for_status()
     return resp.text
-
 
 def extract_staffs_from_html(html: str):
     soup = BeautifulSoup(html, "lxml")
@@ -122,13 +116,11 @@ def extract_staffs_from_html(html: str):
 
     return report_title, prev_staffs_vec, curr_staffs_vec
 
-
 def load_json_file(file_name: str):
     base_dir = Path(__file__).resolve().parent
     file_path = base_dir / file_name
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
     sender_map = load_json_file("mail_sender_staffs.json")
@@ -140,7 +132,6 @@ def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
     raise ValueError(
         "Không tìm thấy username nào trong curr_staffs có trong file mail_sender_staffs.json."
     )
-
 
 def build_export_payload(page_id: str) -> dict:
     return {
@@ -193,7 +184,6 @@ def build_export_payload(page_id: str) -> dict:
         "debugMode": False,
     }
 
-
 def start_export_job(session: requests.Session, page_id: str) -> str:
     payload = build_export_payload(page_id)
 
@@ -213,7 +203,6 @@ def start_export_job(session: requests.Session, page_id: str) -> str:
 
     return job_id
 
-
 def wait_for_download_url(session: requests.Session, job_id: str) -> str:
     status_url = f"{EXPORT_API_URL}/{job_id}/status"
 
@@ -228,7 +217,6 @@ def wait_for_download_url(session: requests.Session, job_id: str) -> str:
             return download_url
 
         time.sleep(5)
-
 
 def download_export_file(session: requests.Session, download_url: str) -> Path:
     resp = session.get(download_url, timeout=120)
@@ -245,10 +233,8 @@ def download_export_file(session: requests.Session, download_url: str) -> Path:
 
     return file_path
 
-
 def load_smtp_config():
     return load_json_file("smtp_config.json")
-
 
 def build_mail_subject_and_shift():
     now = datetime.now(BANGKOK_TZ)
@@ -314,7 +300,6 @@ def build_email_message(
 
     return msg
 
-
 def send_handover_email(
     prev_staffs: str,
     curr_staffs: str,
@@ -344,7 +329,6 @@ def send_handover_email(
         )
         server.send_message(msg)
 
-
 def run():
     report_url, jsessionid = login_sso_and_get_session_info()
     page_id = parse_page_id(report_url)
@@ -365,16 +349,7 @@ def run():
     sender_fullname = resolve_sender_fullname(curr_staffs_vec)
 
     receivers = [
-        "anhlmv@os.viettel.com.vn",
-        # "halq1@viettel.com.vn",
-        # "thuannt84@viettel.com.vn",
-        # "tiepvv@viettel.com.vn",
-        # "tanpv5@viettel.com.vn",
-        # "namth8@viettel.com.vn",
-        # "chungnh3@viettel.com.vn",
-        # "thaiph5@viettel.com.vn",
-        # "noc_cloudrity@viettel.com.vn",
-        # "noc_vcs@viettel.com.vn",
+        "",
     ]
 
     job_id = start_export_job(session, page_id)
@@ -394,7 +369,6 @@ def run():
     )
 
     print("Gửi mail thành công")
-
 
 if __name__ == "__main__":
     try:

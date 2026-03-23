@@ -11,7 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 
-os.environ["SE_PROXY"] = "http:192.168.5.8:3128"
+os.environ["SE_PROXY"] = "http://192.168.5.8:3128"
 
 BASE_URL = "https://cloudrity.com.vn"
 LOGIN_URL = f"{BASE_URL}/admin/#/orders"
@@ -32,7 +32,6 @@ USER_AGENT = (
     "Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
 )
 
-
 def valid_date(value: str) -> str:
     try:
         datetime.strptime(value, "%Y-%m-%d")
@@ -41,7 +40,6 @@ def valid_date(value: str) -> str:
         raise argparse.ArgumentTypeError(
             f"Ngày không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM-DD"
         )
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -75,7 +73,6 @@ def parse_args():
         parser.error("--start_date phải nhỏ hơn hoặc bằng --end_date")
 
     return args
-
 
 class CloudrityClient:
     def __init__(
@@ -284,7 +281,6 @@ class CloudrityClient:
         print(f"Saved report: {output_path.resolve()}")
         return output_path
 
-
 def main():
     args = parse_args()
 
@@ -311,7 +307,6 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

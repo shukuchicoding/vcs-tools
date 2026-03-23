@@ -1,6 +1,0 @@
-{
-    "smtp_host":"smtp_domain",
-    "smtp_username":"your_email",
-    "smtp_password":"your_password",
-    "mail_from":"your_email"
-}
