@@ -3,10 +3,17 @@ from collections import Counter, defaultdict
 from openpyxl import load_workbook
 import argparse
 import sys
+import re
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Tổng hợp báo cáo."
+        description="Tổng hợp report từ file xlsx và pdf trong cùng thư mục."
     )
     parser.add_argument(
         "--folder",
@@ -18,13 +25,7 @@ def parse_args():
         "--top-k",
         required=True,
         type=int,
-        help="Số lượng top muốn hiển thị",
-    )
-    parser.add_argument(
-        "--report-type",
-        required=True,
-        choices=["events", "attacks"],
-        help="Loại báo cáo: events hoặc attacks",
+        help="Số lượng top muốn hiển thị cho phần events (.xlsx)",
     )
 
     args = parser.parse_args()
@@ -36,19 +37,27 @@ def parse_args():
     if args.top_k <= 0:
         parser.error("--top-k phải là số nguyên dương.")
 
-    return folder, args.top_k, args.report_type
+    return folder, args.top_k
 
-def build_output_file(folder_path: Path, report_type: str) -> Path:
+
+def build_output_file(folder_path: Path) -> Path:
     folder_name = folder_path.name.strip()
     if not folder_name:
         folder_name = "default"
-    return folder_path / f"{folder_name}_{report_type}_report.txt"
+    return folder_path / f"{folder_name}_report.txt"
+
 
 def normalize_cell_value(value) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def parse_int_with_dots(text: str) -> int:
+    text = text.strip().replace(".", "").replace(",", "")
+    return int(text) if text.isdigit() else 0
+
 
 def process_excel_file(file_path: Path):
     counter_ip = Counter()
@@ -60,10 +69,9 @@ def process_excel_file(file_path: Path):
     try:
         for sheet in wb.worksheets:
             for row in sheet.iter_rows(min_row=12, min_col=5, max_col=8, values_only=True):
-                # row gồm: E, F, G, H
-                val_ip = normalize_cell_value(row[0])      # cột E
-                val_nation = normalize_cell_value(row[1])  # cột F
-                val_url = normalize_cell_value(row[3])     # cột H
+                val_ip = normalize_cell_value(row[0])      # E
+                val_nation = normalize_cell_value(row[1])  # F
+                val_url = normalize_cell_value(row[3])     # H
 
                 if val_ip is not None or val_nation is not None or val_url is not None:
                     total_rows += 1
@@ -81,34 +89,173 @@ def process_excel_file(file_path: Path):
 
     return counter_ip, counter_url, ip_nation_map, total_rows
 
-def process_pdf_file(file_path: Path):
-    """
-    Placeholder cho report_type='attacks'.
-    Bạn sẽ tự bổ sung logic xử lý PDF sau.
-    """
-    raise NotImplementedError("Chưa implement xử lý PDF cho report_type='attacks'")
 
-def get_top_ip_with_nation(counter_ip: Counter, ip_nation_map: dict, top_k: int):
+def extract_pdf_text(file_path: Path) -> str:
+    if PdfReader is None:
+        raise RuntimeError("Thiếu thư viện pypdf. Cài bằng: pip install pypdf")
+
+    reader = PdfReader(str(file_path))
+    texts = []
+    for page in reader.pages:
+        texts.append(page.extract_text() or "")
+    return "\n".join(texts)
+
+
+def normalize_pdf_text(text: str) -> str:
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\r", "\n", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def extract_section(text: str, start_marker: str, end_markers: list[str]) -> str:
+    start_idx = text.find(start_marker)
+    if start_idx == -1:
+        return ""
+
+    section = text[start_idx + len(start_marker):]
+
+    end_positions = []
+    for marker in end_markers:
+        idx = section.find(marker)
+        if idx != -1:
+            end_positions.append(idx)
+
+    if end_positions:
+        section = section[:min(end_positions)]
+
+    return section.strip()
+
+
+def parse_attack_lines(block_text: str):
+    results = []
+    pattern = re.compile(r"([A-Za-z0-9_\-./]+)\s+(\d+(?:,\d+)?)%\s+\(([\d.]+)\)")
+
+    for line in block_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        m = pattern.search(line)
+        if not m:
+            continue
+
+        attack_type = m.group(1).strip()
+        percent_str = m.group(2).replace(",", ".")
+        count_str = m.group(3).strip()
+
+        try:
+            percent = float(percent_str)
+        except ValueError:
+            percent = 0.0
+
+        count = parse_int_with_dots(count_str)
+
+        results.append({
+            "type": attack_type,
+            "percent": percent,
+            "count": count,
+        })
+
+    return results
+
+
+def process_pdf_file(file_path: Path):
+    raw_text = extract_pdf_text(file_path)
+    text = normalize_pdf_text(raw_text)
+
+    web_total = 0
+    ddos_total = 0
+
+    m_web = re.search(
+        r"Tấn công lỗ hổng web\s*\(Tổng số\s*([\d.]+)\s*cuộc tấn công\)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m_web:
+        web_total = parse_int_with_dots(m_web.group(1))
+
+    if re.search(
+        r"Không có dữ liệu tấn công DDOS tầng ứng dụng để hiển thị",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        ddos_total = 0
+    else:
+        m_ddos = re.search(
+            r"Tấn công DDOS tầng ứng dụng\s*\(Tổng số\s*([\d.]+)\s*cuộc tấn công\)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if m_ddos:
+            ddos_total = parse_int_with_dots(m_ddos.group(1))
+
+    web_attack_block = extract_section(
+        text,
+        start_marker="Các loại tấn công khai thác lỗ hổng",
+        end_markers=[
+            "DDOS TẦNG ỨNG DỤNG",
+            "Các loại tấn công DDOS",
+            "TƯỜNG LỬA BẢO VỆ WEBSITE Tìm hiểu thêm",
+            "Top tên miền bị tấn công khai thác lỗ hổng",
+        ],
+    )
+    web_attack_types = parse_attack_lines(web_attack_block)
+
+    ddos_attack_block = extract_section(
+        text,
+        start_marker="Các loại tấn công DDOS",
+        end_markers=[
+            "TƯỜNG LỬA BẢO VỆ WEBSITE Tìm hiểu thêm",
+            "Top tên miền bị tấn công DDOS L7",
+            "Mọi chi tiết xin liên hệ",
+        ],
+    )
+
+    if re.search(r"Không có dữ liệu để hiển thị", ddos_attack_block, flags=re.IGNORECASE):
+        ddos_attack_types = []
+    else:
+        ddos_attack_types = parse_attack_lines(ddos_attack_block)
+
+    if web_total == 0 and web_attack_types:
+        web_total = sum(item["count"] for item in web_attack_types)
+
+    if ddos_total == 0 and ddos_attack_types:
+        ddos_total = sum(item["count"] for item in ddos_attack_types)
+
+    return {
+        "web_total": web_total,
+        "ddos_total": ddos_total,
+        "web_attack_types": web_attack_types,
+        "ddos_attack_types": ddos_attack_types,
+    }
+
+
+def get_top_ip_with_nation(counter_ip: Counter, ip_nation_map: dict, top_k: int, total_events: int):
     result = []
     for ip, count in counter_ip.most_common(top_k):
         nation_counter = ip_nation_map.get(ip, Counter())
         if nation_counter:
-            nation, nation_count = nation_counter.most_common(1)[0]
+            nation, _ = nation_counter.most_common(1)[0]
         else:
-            nation, nation_count = "Unknown", 0
+            nation = "Unknown"
+
+        percent = (count / total_events * 100) if total_events > 0 else 0.0
 
         result.append({
             "ip": ip,
             "count": count,
             "nation": nation,
-            "nation_count_for_ip": nation_count,
+            "percent": percent,
         })
     return result
+
 
 def format_top_ip_with_nation(top_ip_data):
     lines = []
     title = "TOP IPs và quốc gia tương ứng"
-    lines.append(f"\n{title}")
+    lines.append(title)
     lines.append("-" * len(title))
 
     if not top_ip_data:
@@ -116,14 +263,16 @@ def format_top_ip_with_nation(top_ip_data):
         return lines
 
     for idx, item in enumerate(top_ip_data, start=1):
+        percent_str = f"{item['percent']:.2f}".replace(".", ",")
         lines.append(
-            f"{idx:>2}. IP: {item['ip']} -> {item['count']} | Nation: {item['nation']}"
+            f"{idx:>2}. IP: {item['ip']} -> {item['count']} ({percent_str}%) | Nation: {item['nation']}"
         )
     return lines
 
+
 def format_top(counter: Counter, title: str, top_k: int):
     lines = []
-    lines.append(f"\n{title}")
+    lines.append(title)
     lines.append("-" * len(title))
 
     if not counter:
@@ -134,19 +283,45 @@ def format_top(counter: Counter, title: str, top_k: int):
         lines.append(f"{idx:>2}. {value} -> {count}")
     return lines
 
-def handle_events(folder_path: Path, top_k: int, output_file: Path):
+
+def format_all_attack_types(title: str, attack_counter: Counter):
+    lines = []
+    lines.append(title)
+    lines.append("-" * len(title))
+
+    if not attack_counter:
+        lines.append("Không có dữ liệu.")
+        return lines
+
+    total_attack_type_count = sum(attack_counter.values())
+
+    for idx, (attack_type, count) in enumerate(attack_counter.most_common(), start=1):
+        percent = (count / total_attack_type_count * 100) if total_attack_type_count > 0 else 0.0
+        percent_str = f"{percent:.2f}".replace(".", ",")
+        lines.append(f"{idx:>2}. {attack_type} -> {percent_str}% ({count})")
+
+    return lines
+
+
+def handle_events(folder_path: Path, top_k: int):
     excel_files = list(folder_path.rglob("*.xlsx"))
+
+    section_lines = []
+    section_lines.append("=" * 60)
+    section_lines.append("EVENTS REPORT")
+    section_lines.append("=" * 60)
+
     if not excel_files:
-        print(f"Không tìm thấy file .xlsx nào trong thư mục: {folder_path}")
-        sys.exit(0)
+        section_lines.append("Không tìm thấy file .xlsx nào.")
+        return section_lines
 
     total_counter_ip = Counter()
     total_counter_url = Counter()
     total_ip_nation_map = defaultdict(Counter)
     grand_total_rows = 0
 
-    console_lines = []
-    console_lines.append(f"\nTổng hợp {len(excel_files)} file .xlsx\n")
+    section_lines.append(f"Tổng hợp {len(excel_files)} file .xlsx")
+    section_lines.append("")
 
     for file_path in excel_files:
         try:
@@ -159,84 +334,112 @@ def handle_events(folder_path: Path, top_k: int, output_file: Path):
             for ip, nation_counter in ip_nation_map.items():
                 total_ip_nation_map[ip].update(nation_counter)
 
-            console_lines.append(f"Đã xử lý: {file_path} | Số event: {file_rows}")
+            section_lines.append(f"Đã xử lý: {file_path} | Số event: {file_rows}")
         except Exception as e:
-            console_lines.append(f"Lỗi khi đọc file {file_path}: {e}")
+            section_lines.append(f"Lỗi khi đọc file {file_path}: {e}")
 
-    top_ip_data = get_top_ip_with_nation(total_counter_ip, total_ip_nation_map, top_k)
+    top_ip_data = get_top_ip_with_nation(
+        total_counter_ip,
+        total_ip_nation_map,
+        top_k,
+        grand_total_rows,
+    )
 
-    report_lines = []
-    report_lines.append("=" * 60)
-    report_lines.append(f"TỔNG số events ở tất cả file: {grand_total_rows}")
-    report_lines.append("=" * 60)
-    report_lines.extend(format_top_ip_with_nation(top_ip_data))
-    report_lines.extend(format_top(total_counter_url, f"TOP {top_k} URLs", top_k))
+    section_lines.append("")
+    section_lines.append(f"TỔNG số events ở tất cả file: {grand_total_rows}")
+    section_lines.append("")
+    section_lines.extend(format_top_ip_with_nation(top_ip_data))
+    section_lines.append("")
+    section_lines.extend(format_top(total_counter_url, f"TOP {top_k} URLs", top_k))
 
-    for line in console_lines:
-        print(line)
-    print()
-    for line in report_lines:
-        print(line)
+    return section_lines
 
-    with open(output_file, "w", encoding="utf-8") as f:
-        for line in console_lines:
-            f.write(line + "\n")
-        f.write("\n")
-        for line in report_lines:
-            f.write(line + "\n")
 
-    print(f"\nĐã ghi report ra file: {output_file}")
-
-def handle_attacks(folder_path: Path, top_k: int, output_file: Path):
+def handle_attacks(folder_path: Path):
     pdf_files = list(folder_path.rglob("*.pdf"))
-    if not pdf_files:
-        print(f"Không tìm thấy file .pdf nào trong thư mục: {folder_path}")
-        sys.exit(0)
 
-    console_lines = []
-    console_lines.append(f"\nTổng hợp {len(pdf_files)} file .pdf\n")
+    section_lines = []
+    section_lines.append("=" * 60)
+    section_lines.append("ATTACKS REPORT")
+    section_lines.append("=" * 60)
+
+    if not pdf_files:
+        section_lines.append("Không tìm thấy file .pdf nào.")
+        return section_lines
+
+    grand_total_web = 0
+    grand_total_ddos = 0
+    web_attack_counter = Counter()
+    ddos_attack_counter = Counter()
+
+    section_lines.append(f"Tổng hợp {len(pdf_files)} file .pdf")
+    section_lines.append("")
 
     for file_path in pdf_files:
         try:
-            process_pdf_file(file_path)
-            console_lines.append(f"Đã phát hiện file PDF: {file_path}")
-        except NotImplementedError as e:
-            console_lines.append(f"Chưa xử lý file {file_path}: {e}")
+            result = process_pdf_file(file_path)
+
+            grand_total_web += result["web_total"]
+            grand_total_ddos += result["ddos_total"]
+
+            for item in result["web_attack_types"]:
+                web_attack_counter[item["type"]] += item["count"]
+
+            for item in result["ddos_attack_types"]:
+                ddos_attack_counter[item["type"]] += item["count"]
+
+            section_lines.append(
+                f"Đã xử lý: {file_path} | Web attacks: {result['web_total']} | DDoS attacks: {result['ddos_total']}"
+            )
         except Exception as e:
-            console_lines.append(f"Lỗi khi đọc file {file_path}: {e}")
+            section_lines.append(f"Lỗi khi đọc file {file_path}: {e}")
+
+    section_lines.append("")
+    section_lines.append(f"TỔNG số cuộc tấn công lỗ hổng web: {grand_total_web}")
+    section_lines.append(f"TỔNG số cuộc tấn công DDoS: {grand_total_ddos}")
+    section_lines.append("")
+    section_lines.extend(
+        format_all_attack_types(
+            "Các loại tấn công khai thác lỗ hổng",
+            web_attack_counter,
+        )
+    )
+    section_lines.append("")
+    section_lines.extend(
+        format_all_attack_types(
+            "Các loại tấn công DDoS",
+            ddos_attack_counter,
+        )
+    )
+
+    return section_lines
+
+
+def main():
+    folder_path, top_k = parse_args()
+    output_file = build_output_file(folder_path)
 
     report_lines = []
-    report_lines.append("=" * 60)
-    report_lines.append("REPORT TYPE: ATTACKS")
-    report_lines.append("Chưa implement logic xử lý PDF.")
-    report_lines.append("=" * 60)
+    report_lines.append(f"THƯ MỤC BÁO CÁO: {folder_path}")
+    report_lines.append("")
 
-    for line in console_lines:
-        print(line)
-    print()
+    events_lines = handle_events(folder_path, top_k)
+    attacks_lines = handle_attacks(folder_path)
+
+    report_lines.extend(events_lines)
+    report_lines.append("")
+    report_lines.extend(attacks_lines)
+    report_lines.append("")
+
     for line in report_lines:
         print(line)
 
     with open(output_file, "w", encoding="utf-8") as f:
-        for line in console_lines:
-            f.write(line + "\n")
-        f.write("\n")
         for line in report_lines:
             f.write(line + "\n")
 
     print(f"\nĐã ghi report ra file: {output_file}")
 
-def main():
-    folder_path, top_k, report_type = parse_args()
-    output_file = build_output_file(folder_path, report_type)
-
-    if report_type == "events":
-        handle_events(folder_path, top_k, output_file)
-    elif report_type == "attacks":
-        handle_attacks(folder_path, top_k, output_file)
-    else:
-        print(f"report_type không hợp lệ: {report_type}")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
