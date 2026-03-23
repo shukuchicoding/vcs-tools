@@ -142,9 +142,6 @@ class CloudrityClient:
         self.session.cookies.set("D1N", self.d1n, domain="cloudrity.com.vn", path="/")
         self.session.cookies.set("JSESSIONID", self.jsessionid, domain="cloudrity.com.vn", path="/")
 
-        print(f"D1N: {self.d1n}")
-        print(f"JSESSIONID: {self.jsessionid}")
-
     def get_customer_info(self):
         if not self.d1n or not self.jsessionid:
             raise ValueError("Chưa có D1N/JSESSIONID. Hãy gọi login_and_capture_cookies() trước.")
@@ -173,8 +170,6 @@ class CloudrityClient:
         if not self.customer_id or not self.distributor_id:
             raise ValueError("Thiếu customer_id hoặc distributor_id trong response.")
 
-        print(f"customer_id: {self.customer_id}")
-        print(f"distributor_id: {self.distributor_id}")
         return self.customer_id, self.distributor_id
 
     def get_domains(self):
