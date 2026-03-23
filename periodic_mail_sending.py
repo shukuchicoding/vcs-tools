@@ -2,6 +2,7 @@ import json
 import sys
 import time
 import smtplib
+import os
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
@@ -13,6 +14,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from datetime import datetime, timedelta, timezone
 
+os.environ["SE_PROXY"] = "http:192.168.5.8:3128"
 
 BANGKOK_TZ = timezone(timedelta(hours=7))
 USER_AGENT = (

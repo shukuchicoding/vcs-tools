@@ -4,11 +4,14 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+import os
 
 import requests
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
+
+os.environ["SE_PROXY"] = "http:192.168.5.8:3128"
 
 BASE_URL = "https://cloudrity.com.vn"
 LOGIN_URL = f"{BASE_URL}/admin/#/orders"
