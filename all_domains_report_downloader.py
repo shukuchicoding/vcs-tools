@@ -1,27 +1,17 @@
 import argparse
+import json
 import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
+from urllib.parse import urlparse
 import requests
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 
-BASE_URL = "https://cloudrity.com.vn"
-LOGIN_URL = f"{BASE_URL}/admin/#/orders"
-
-CUSTOMER_API_URL = f"{BASE_URL}/admin_api/v1/customer/"
-DOMAIN_API_URL = f"{BASE_URL}/admin_api/v1/domain/website/"
-
-EXPORT_EVENTS_API_URL = (
-    f"{BASE_URL}/admin_waf/api/v1/customer-report/export-customer-event/"
-)
-EXPORT_ATTACKS_API_URL = (
-    f"{BASE_URL}/admin_api/v1/customer-report/export-attacks-report/"
-)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -40,9 +30,33 @@ def valid_date(value: str) -> str:
         )
 
 
+def load_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        raise FileNotFoundError(f"Không tìm thấy file config: {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    export_base_url = str(data.get("export_base_url", "")).strip()
+    if not export_base_url:
+        raise ValueError("Thiếu 'export_base_url' trong config.json")
+
+    return data
+
+def get_cookie_domain_from_base_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"export_base_url không hợp lệ: {base_url}")
+
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"Không lấy được hostname từ export_base_url: {base_url}")
+
+    return host
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Export customer report từ cloudrity.com.vn"
+        description="Export customer report"
     )
     parser.add_argument("--customer_account", required=True, help="Tên tài khoản customer")
     parser.add_argument(
@@ -63,6 +77,16 @@ def parse_args():
         choices=["events", "attacks"],
         help="Loại báo cáo: events hoặc attacks",
     )
+    parser.add_argument(
+        "--proxy",
+        required=False,
+        help="Proxy dùng khi khởi tạo Selenium driver thất bại, ví dụ: http://192.168.5.8:3128",
+    )
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Đường dẫn file config.json",
+    )
 
     args = parser.parse_args()
 
@@ -74,21 +98,42 @@ def parse_args():
     return args
 
 
-class CloudrityClient:
+class CloudClient:
     def __init__(
         self,
         customer_account: str,
         start_date: str,
         end_date: str,
         report_type: str,
+        base_url: str,
+        proxy: str | None = None,
     ):
         self.customer_account = customer_account
         self.start_date = start_date
         self.end_date = end_date
         self.report_type = report_type
+        self.base_url = base_url.rstrip("/")
+        self.proxy = proxy.strip() if proxy else None
+        self.cookie_domain = get_cookie_domain_from_base_url(self.base_url)
+
+        self.login_url = f"{self.base_url}/admin/#/orders"
+        self.customer_api_url = f"{self.base_url}/admin_api/v1/customer/"
+        self.domain_api_url = f"{self.base_url}/admin_api/v1/domain/website/"
+        self.export_events_api_url = (
+            f"{self.base_url}/admin_waf/api/v1/customer-report/export-customer-event/"
+        )
+        self.export_attacks_api_url = (
+            f"{self.base_url}/admin_api/v1/customer-report/export-attacks-report/"
+        )
 
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
+
+        if self.proxy:
+            self.session.proxies.update({
+                "http": self.proxy,
+                "https": self.proxy,
+            })
 
         self.d1n = None
         self.jsessionid = None
@@ -96,51 +141,84 @@ class CloudrityClient:
         self.distributor_id = None
         self.domain_names = []
 
-    def login_and_capture_cookies(self):
+    def _build_edge_options(self, proxy: str | None = None) -> Options:
         options = Options()
         options.add_argument("--log-level=3")
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
-        driver = webdriver.Edge(options=options)
-        driver.get(LOGIN_URL)
+        if proxy:
+            options.add_argument(f"--proxy-server={proxy}")
 
-        print("Đăng nhập trên cửa sổ Edge vừa mở.")
-        input("Đăng nhập xong, nhấn Enter để tiếp tục ...")
+        return options
 
-        # chờ cookie xuất hiện
-        WebDriverWait(driver, 30).until(lambda d: len(d.get_cookies()) > 0)
+    def _create_driver(self):
+        """
+        Thử khởi tạo driver không proxy trước.
+        Nếu thất bại và có self.proxy thì thử lại với proxy.
+        """
+        try:
+            options = self._build_edge_options()
+            return webdriver.Edge(options=options)
+        except Exception as first_error:
+            if not self.proxy:
+                raise RuntimeError(
+                    f"Khởi tạo Edge driver thất bại và không có proxy để fallback. Chi tiết: {first_error}"
+                ) from first_error
 
-        cookies = driver.get_cookies()
+            print(
+                f"Khởi tạo Edge driver lần đầu thất bại. Thử lại với proxy: {self.proxy}"
+            )
 
-        jsessionid = None
-        d1n = None
+            try:
+                options = self._build_edge_options(proxy=self.proxy)
+                return webdriver.Edge(options=options)
+            except Exception as second_error:
+                raise RuntimeError(
+                    "Khởi tạo Edge driver thất bại cả khi không dùng proxy và khi dùng proxy. "
+                    f"Lỗi lần 1: {first_error} | Lỗi lần 2: {second_error}"
+                ) from second_error
 
-        for c in cookies:
-            name = c.get("name", "").lower()
-            if name == "jsessionid":
-                jsessionid = c.get("value")
-            elif name == "d1n":
-                d1n = c.get("value")
+    def login_and_capture_cookies(self):
+        driver = self._create_driver()
 
-        # nếu D1N chưa có trong cookies thì thử lấy từ HTML
-        if not d1n:
-            page_source = driver.page_source or ""
-            match = re.search(r'D1N=([a-fA-F0-9]+)', page_source)
-            if match:
-                d1n = match.group(1)
+        try:
+            driver.get(self.login_url)
 
-        driver.quit()
+            print("Đăng nhập trên cửa sổ Edge vừa mở.")
+            input("Đăng nhập xong, nhấn Enter để tiếp tục ...")
 
-        if not jsessionid:
-            raise ValueError("Không lấy được JSESSIONID từ phiên Selenium.")
-        if not d1n:
-            raise ValueError("Không lấy được D1N từ phiên Selenium/HTML.")
+            WebDriverWait(driver, 30).until(lambda d: len(d.get_cookies()) > 0)
 
-        self.jsessionid = jsessionid
-        self.d1n = d1n
+            cookies = driver.get_cookies()
 
-        self.session.cookies.set("D1N", self.d1n, domain="cloudrity.com.vn", path="/")
-        self.session.cookies.set("JSESSIONID", self.jsessionid, domain="cloudrity.com.vn", path="/")
+            jsessionid = None
+            d1n = None
+
+            for c in cookies:
+                name = c.get("name", "").lower()
+                if name == "jsessionid":
+                    jsessionid = c.get("value")
+                elif name == "d1n":
+                    d1n = c.get("value")
+
+            if not d1n:
+                page_source = driver.page_source or ""
+                match = re.search(r"D1N=([a-fA-F0-9]+)", page_source)
+                if match:
+                    d1n = match.group(1)
+
+            if not jsessionid:
+                raise ValueError("Không lấy được JSESSIONID từ phiên Selenium.")
+            if not d1n:
+                raise ValueError("Không lấy được D1N từ phiên Selenium/HTML.")
+
+            self.jsessionid = jsessionid
+            self.d1n = d1n
+
+            self.session.cookies.set("D1N", self.d1n, domain=self.cookie_domain, path="/")
+            self.session.cookies.set("JSESSIONID", self.jsessionid, domain=self.cookie_domain, path="/")
+        finally:
+            driver.quit()
 
     def get_customer_info(self):
         if not self.d1n or not self.jsessionid:
@@ -152,7 +230,7 @@ class CloudrityClient:
         }
 
         resp = self.session.get(
-            CUSTOMER_API_URL,
+            self.customer_api_url,
             params=params,
             timeout=30,
         )
@@ -182,7 +260,7 @@ class CloudrityClient:
         }
 
         resp = self.session.get(
-            DOMAIN_API_URL,
+            self.domain_api_url,
             params=params,
             timeout=30,
         )
@@ -199,8 +277,8 @@ class CloudrityClient:
 
     def get_export_url(self) -> str:
         if self.report_type == "events":
-            return EXPORT_EVENTS_API_URL
-        return EXPORT_ATTACKS_API_URL
+            return self.export_events_api_url
+        return self.export_attacks_api_url
 
     def build_export_payload(self) -> dict:
         payload = {
@@ -284,12 +362,17 @@ class CloudrityClient:
 
 def main():
     args = parse_args()
+    config = load_config(Path(args.config))
 
-    client = CloudrityClient(
+    base_url = str(config["export_base_url"]).strip()
+
+    client = CloudClient(
         customer_account=args.customer_account,
         start_date=args.start_date,
         end_date=args.end_date,
         report_type=args.report_type,
+        base_url=base_url,
+        proxy=args.proxy,
     )
 
     try:
