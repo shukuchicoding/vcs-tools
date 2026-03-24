@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ def valid_month(value: str) -> str:
         return value
     except ValueError:
         raise argparse.ArgumentTypeError(
-            f"Tháng không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM"
+            f"Tháng không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM'"
         )
 
 
@@ -48,6 +49,11 @@ def parse_args():
         type=valid_top_k,
         help="Số lượng top kết quả cần phân tích",
     )
+    parser.add_argument(
+        "--proxy",
+        required=False,
+        help="Proxy truyền tiếp cho all_domains_report_downloader.py, ví dụ: http://127.0.0.1:3128",
+    )
     return parser.parse_args()
 
 
@@ -62,14 +68,23 @@ def run_command(cmd: list[str], step_name: str):
         )
 
 
+def remove_reports_folder(folder: Path):
+    if folder.exists():
+        print(f"Xóa thư mục báo cáo cũ: {folder.resolve()}")
+        shutil.rmtree(folder)
+
+
 def main():
     args = parse_args()
 
     customer_account = args.customer_account
     month = args.month
     top_k = args.top_k
+    proxy = args.proxy
 
     reports_folder = Path("..") / "reports" / customer_account
+
+    remove_reports_folder(reports_folder)
 
     export_cmd = [
         sys.executable,
@@ -79,6 +94,9 @@ def main():
         "--month",
         month,
     ]
+
+    if proxy:
+        export_cmd.extend(["--proxy", proxy])
 
     analyze_cmd = [
         sys.executable,
