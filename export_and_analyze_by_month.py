@@ -12,7 +12,7 @@ def valid_month(value: str) -> str:
         return value
     except ValueError:
         raise argparse.ArgumentTypeError(
-            f"Tháng không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM'"
+            f"Tháng không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM"
         )
 
 
@@ -50,9 +50,11 @@ def parse_args():
         help="Số lượng top kết quả cần phân tích",
     )
     parser.add_argument(
-        "--proxy",
-        required=False,
-        help="Proxy truyền tiếp cho all_domains_report_downloader.py, ví dụ: http://127.0.0.1:3128",
+        "--from",
+        dest="run_from",
+        required=True,
+        choices=["NOC-PC", "NOC-LAPTOP"],
+        help="Nguồn chạy script: NOC-PC hoặc NOC-LAPTOP",
     )
     return parser.parse_args()
 
@@ -80,7 +82,7 @@ def main():
     customer_account = args.customer_account
     month = args.month
     top_k = args.top_k
-    proxy = args.proxy
+    run_from = args.run_from
 
     reports_folder = Path("..") / "reports" / customer_account
 
@@ -93,10 +95,9 @@ def main():
         customer_account,
         "--month",
         month,
+        "--from",
+        run_from,
     ]
-
-    if proxy:
-        export_cmd.extend(["--proxy", proxy])
 
     analyze_cmd = [
         sys.executable,

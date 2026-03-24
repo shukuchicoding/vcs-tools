@@ -98,8 +98,11 @@ def parse_args():
         help="Loại báo cáo: events hoặc attacks. Mặc định: export cả hai",
     )
     parser.add_argument(
-        "--proxy",
-        help="Proxy dùng cho requests và Selenium, ví dụ: http://192.168.5.8:3128",
+        "--from",
+        dest="run_from",
+        required=True,
+        choices=["NOC-PC", "NOC-LAPTOP"],
+        help="Nguồn chạy script: NOC-PC hoặc NOC-LAPTOP",
     )
     parser.add_argument("--config", default="config.json", help="Đường dẫn file config.json")
 
@@ -338,6 +341,16 @@ def resolve_report_dates(args, report_type: str) -> tuple[str, str]:
     return args.start_date, args.end_date
 
 
+def resolve_proxy(run_from: str, config: dict) -> str | None:
+    if run_from == "NOC-PC":
+        proxy = str(config.get("proxy", "")).strip()
+        if not proxy:
+            raise ValueError("Thiếu 'proxy' trong config.json khi chạy với --from NOC-PC")
+        return proxy
+
+    return None
+
+
 def run_export(client: CloudClient, args, report_type: str):
     client.report_type = report_type
 
@@ -367,6 +380,7 @@ def main():
     args = parse_args()
     config = load_config(Path(args.config))
     base_url = str(config["export_base_url"]).strip()
+    proxy = resolve_proxy(args.run_from, config)
 
     report_types = [args.report_type] if args.report_type else ["events", "attacks"]
 
@@ -379,7 +393,7 @@ def main():
         end_date=end_date,
         report_type=initial_report_type,
         base_url=base_url,
-        proxy=args.proxy,
+        proxy=proxy,
     )
 
     client.prepare()

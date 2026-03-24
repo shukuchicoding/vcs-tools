@@ -60,6 +60,7 @@ def parse_int_with_dots(text: str) -> int:
 
 
 def process_excel_file(file_path: Path):
+    counter_domain = Counter()
     counter_ip = Counter()
     counter_url = Counter()
     ip_nation_map = defaultdict(Counter)
@@ -68,13 +69,22 @@ def process_excel_file(file_path: Path):
     wb = load_workbook(file_path, read_only=True, data_only=True)
     try:
         for sheet in wb.worksheets:
-            for row in sheet.iter_rows(min_row=12, min_col=5, max_col=8, values_only=True):
-                val_ip = normalize_cell_value(row[0])      # E
-                val_nation = normalize_cell_value(row[1])  # F
-                val_url = normalize_cell_value(row[3])     # H
+            for row in sheet.iter_rows(min_row=12, min_col=4, max_col=8, values_only=True):
+                val_domain = normalize_cell_value(row[0])  # D
+                val_ip = normalize_cell_value(row[1])      # E
+                val_nation = normalize_cell_value(row[2])  # F
+                val_url = normalize_cell_value(row[4])     # H
 
-                if val_ip is not None or val_nation is not None or val_url is not None:
+                if (
+                    val_domain is not None
+                    or val_ip is not None
+                    or val_nation is not None
+                    or val_url is not None
+                ):
                     total_rows += 1
+
+                if val_domain is not None:
+                    counter_domain.update([val_domain])
 
                 if val_ip is not None:
                     counter_ip.update([val_ip])
@@ -87,7 +97,7 @@ def process_excel_file(file_path: Path):
     finally:
         wb.close()
 
-    return counter_ip, counter_url, ip_nation_map, total_rows
+    return counter_domain, counter_ip, counter_url, ip_nation_map, total_rows
 
 
 def extract_pdf_text(file_path: Path) -> str:
@@ -315,6 +325,7 @@ def handle_events(folder_path: Path, top_k: int):
         section_lines.append("Không tìm thấy file .xlsx nào.")
         return section_lines
 
+    total_counter_domain = Counter()
     total_counter_ip = Counter()
     total_counter_url = Counter()
     total_ip_nation_map = defaultdict(Counter)
@@ -325,8 +336,9 @@ def handle_events(folder_path: Path, top_k: int):
 
     for file_path in excel_files:
         try:
-            counter_ip, counter_url, ip_nation_map, file_rows = process_excel_file(file_path)
+            counter_domain, counter_ip, counter_url, ip_nation_map, file_rows = process_excel_file(file_path)
 
+            total_counter_domain.update(counter_domain)
             total_counter_ip.update(counter_ip)
             total_counter_url.update(counter_url)
             grand_total_rows += file_rows
@@ -345,8 +357,19 @@ def handle_events(folder_path: Path, top_k: int):
         grand_total_rows,
     )
 
+    distinct_domain_count = len(total_counter_domain)
+
     section_lines.append("")
     section_lines.append(f"TỔNG số events ở tất cả file: {grand_total_rows}")
+    section_lines.append(f"Số domain bị tấn công: {distinct_domain_count}")
+    section_lines.append("")
+    section_lines.extend(
+        format_top(
+            total_counter_domain,
+            f"TOP {top_k} domain bị tấn công",
+            top_k,
+        )
+    )
     section_lines.append("")
     section_lines.extend(format_top_ip_with_nation(top_ip_data))
     section_lines.append("")
