@@ -1,390 +1,444 @@
-import argparse
-import json
-import re
-import sys
-import time
-from datetime import datetime
 from pathlib import Path
+from collections import Counter, defaultdict
+from openpyxl import load_workbook
+import argparse
+import sys
+import re
 
-from urllib.parse import urlparse
-import requests
-from selenium import webdriver
-from selenium.webdriver.edge.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
-)
-
-
-def valid_date(value: str) -> str:
-    try:
-        datetime.strptime(value, "%Y-%m-%d")
-        return value
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"Ngày không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM-DD"
-        )
-
-
-def load_config(config_path: Path) -> dict:
-    if not config_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file config: {config_path}")
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    export_base_url = str(data.get("export_base_url", "")).strip()
-    if not export_base_url:
-        raise ValueError("Thiếu 'export_base_url' trong config.json")
-
-    return data
-
-
-def get_cookie_domain_from_base_url(base_url: str) -> str:
-    parsed = urlparse(base_url)
-    if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"export_base_url không hợp lệ: {base_url}")
-
-    host = parsed.hostname
-    if not host:
-        raise ValueError(f"Không lấy được hostname từ export_base_url: {base_url}")
-
-    return host
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Export customer report"
+        description="Tổng hợp report từ file xlsx và pdf trong cùng thư mục."
     )
-    parser.add_argument("--customer_account", required=True, help="Tên tài khoản customer")
     parser.add_argument(
-        "--start_date",
+        "--folder",
         required=True,
-        type=valid_date,
-        help="Ngày bắt đầu, định dạng YYYY-MM-DD, ví dụ: 2026-03-01",
+        type=str,
+        help="Đường dẫn thư mục chứa file báo cáo",
     )
     parser.add_argument(
-        "--end_date",
+        "--top-k",
         required=True,
-        type=valid_date,
-        help="Ngày kết thúc, định dạng YYYY-MM-DD, ví dụ: 2026-03-20",
-    )
-    parser.add_argument(
-        "--report_type",
-        required=True,
-        choices=["events", "attacks"],
-        help="Loại báo cáo: events hoặc attacks",
-    )
-    parser.add_argument(
-        "--proxy",
-        required=False,
-        help="Proxy dùng cho requests và Selenium, ví dụ: http://192.168.5.8:3128",
-    )
-    parser.add_argument(
-        "--config",
-        default="config.json",
-        help="Đường dẫn file config.json",
+        type=int,
+        help="Số lượng top muốn hiển thị cho phần events (.xlsx)",
     )
 
     args = parser.parse_args()
 
-    start_dt = datetime.strptime(args.start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(args.end_date, "%Y-%m-%d")
-    if start_dt > end_dt:
-        parser.error("--start_date phải nhỏ hơn hoặc bằng --end_date")
+    folder = Path(args.folder)
+    if not folder.exists() or not folder.is_dir():
+        parser.error(f"Thư mục không tồn tại hoặc không hợp lệ: {folder}")
 
-    return args
+    if args.top_k <= 0:
+        parser.error("--top-k phải là số nguyên dương.")
+
+    return folder, args.top_k
 
 
-class CloudClient:
-    def __init__(
-        self,
-        customer_account: str,
-        start_date: str,
-        end_date: str,
-        report_type: str,
-        base_url: str,
-        proxy: str | None = None,
+def build_output_file(folder_path: Path) -> Path:
+    folder_name = folder_path.name.strip()
+    if not folder_name:
+        folder_name = "default"
+    return folder_path / f"{folder_name}_report.txt"
+
+
+def normalize_cell_value(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def parse_int_with_dots(text: str) -> int:
+    text = text.strip().replace(".", "").replace(",", "")
+    return int(text) if text.isdigit() else 0
+
+
+def process_excel_file(file_path: Path):
+    counter_ip = Counter()
+    counter_url = Counter()
+    ip_nation_map = defaultdict(Counter)
+    total_rows = 0
+
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows(min_row=12, min_col=5, max_col=8, values_only=True):
+                val_ip = normalize_cell_value(row[0])      # E
+                val_nation = normalize_cell_value(row[1])  # F
+                val_url = normalize_cell_value(row[3])     # H
+
+                if val_ip is not None or val_nation is not None or val_url is not None:
+                    total_rows += 1
+
+                if val_ip is not None:
+                    counter_ip.update([val_ip])
+
+                if val_url is not None:
+                    counter_url.update([val_url])
+
+                if val_ip is not None and val_nation is not None:
+                    ip_nation_map[val_ip].update([val_nation])
+    finally:
+        wb.close()
+
+    return counter_ip, counter_url, ip_nation_map, total_rows
+
+
+def extract_pdf_text(file_path: Path) -> str:
+    if PdfReader is None:
+        raise RuntimeError("Thiếu thư viện pypdf. Cài bằng: pip install pypdf")
+
+    reader = PdfReader(str(file_path))
+    texts = []
+    for page in reader.pages:
+        texts.append(page.extract_text() or "")
+    return "\n".join(texts)
+
+
+def normalize_pdf_text(text: str) -> str:
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\r", "\n", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def extract_section(text: str, start_marker: str, end_markers: list[str]) -> str:
+    start_idx = text.find(start_marker)
+    if start_idx == -1:
+        return ""
+
+    section = text[start_idx + len(start_marker):]
+
+    end_positions = []
+    for marker in end_markers:
+        idx = section.find(marker)
+        if idx != -1:
+            end_positions.append(idx)
+
+    if end_positions:
+        section = section[:min(end_positions)]
+
+    return section.strip()
+
+
+def parse_attack_lines(block_text: str):
+    results = []
+    pattern = re.compile(r"([A-Za-z0-9_\-./]+)\s+(\d+(?:,\d+)?)%\s+\(([\d.]+)\)")
+
+    for line in block_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        m = pattern.search(line)
+        if not m:
+            continue
+
+        attack_type = m.group(1).strip()
+        percent_str = m.group(2).replace(",", ".")
+        count_str = m.group(3).strip()
+
+        try:
+            percent = float(percent_str)
+        except ValueError:
+            percent = 0.0
+
+        count = parse_int_with_dots(count_str)
+
+        results.append({
+            "type": attack_type,
+            "percent": percent,
+            "count": count,
+        })
+
+    return results
+
+
+def process_pdf_file(file_path: Path):
+    raw_text = extract_pdf_text(file_path)
+    text = normalize_pdf_text(raw_text)
+
+    web_total = 0
+    ddos_total = 0
+
+    m_web = re.search(
+        r"Tấn công lỗ hổng web\s*\(Tổng số\s*([\d.]+)\s*cuộc tấn công\)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m_web:
+        web_total = parse_int_with_dots(m_web.group(1))
+
+    if re.search(
+        r"Không có dữ liệu tấn công DDOS tầng ứng dụng để hiển thị",
+        text,
+        flags=re.IGNORECASE,
     ):
-        self.customer_account = customer_account
-        self.start_date = start_date
-        self.end_date = end_date
-        self.report_type = report_type
-        self.base_url = base_url.rstrip("/")
-        self.proxy = proxy.strip() if proxy else None
-        self.cookie_domain = get_cookie_domain_from_base_url(self.base_url)
-
-        self.login_url = f"{self.base_url}/admin/#/orders"
-        self.customer_api_url = f"{self.base_url}/admin_api/v1/customer/"
-        self.domain_api_url = f"{self.base_url}/admin_api/v1/domain/website/"
-        self.export_events_api_url = (
-            f"{self.base_url}/admin_waf/api/v1/customer-report/export-customer-event/"
+        ddos_total = 0
+    else:
+        m_ddos = re.search(
+            r"Tấn công DDOS tầng ứng dụng\s*\(Tổng số\s*([\d.]+)\s*cuộc tấn công\)",
+            text,
+            flags=re.IGNORECASE,
         )
-        self.export_attacks_api_url = (
-            f"{self.base_url}/admin_api/v1/customer-report/export-attacks-report/"
-        )
+        if m_ddos:
+            ddos_total = parse_int_with_dots(m_ddos.group(1))
 
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
+    web_attack_block = extract_section(
+        text,
+        start_marker="Các loại tấn công khai thác lỗ hổng",
+        end_markers=[
+            "DDOS TẦNG ỨNG DỤNG",
+            "Các loại tấn công DDOS",
+            "TƯỜNG LỬA BẢO VỆ WEBSITE Tìm hiểu thêm",
+            "Top tên miền bị tấn công khai thác lỗ hổng",
+        ],
+    )
+    web_attack_types = parse_attack_lines(web_attack_block)
 
-        if self.proxy:
-            self.session.proxies.update({
-                "http": self.proxy,
-                "https": self.proxy,
-            })
+    ddos_attack_block = extract_section(
+        text,
+        start_marker="Các loại tấn công DDOS",
+        end_markers=[
+            "TƯỜNG LỬA BẢO VỆ WEBSITE Tìm hiểu thêm",
+            "Top tên miền bị tấn công DDOS L7",
+            "Mọi chi tiết xin liên hệ",
+        ],
+    )
 
-        self.d1n = None
-        self.jsessionid = None
-        self.customer_id = None
-        self.distributor_id = None
-        self.domain_names = []
+    if re.search(r"Không có dữ liệu để hiển thị", ddos_attack_block, flags=re.IGNORECASE):
+        ddos_attack_types = []
+    else:
+        ddos_attack_types = parse_attack_lines(ddos_attack_block)
 
-    def _build_edge_options(self, proxy: str | None = None) -> Options:
-        options = Options()
-        options.add_argument("--log-level=3")
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    if web_total == 0 and web_attack_types:
+        web_total = sum(item["count"] for item in web_attack_types)
 
-        if proxy:
-            options.add_argument(f"--proxy-server={proxy}")
+    if ddos_total == 0 and ddos_attack_types:
+        ddos_total = sum(item["count"] for item in ddos_attack_types)
 
-        return options
+    return {
+        "web_total": web_total,
+        "ddos_total": ddos_total,
+        "web_attack_types": web_attack_types,
+        "ddos_attack_types": ddos_attack_types,
+    }
 
-    def _create_driver(self):
-        """
-        Nếu có self.proxy thì khởi tạo Edge luôn với proxy.
-        Nếu không có self.proxy thì khởi tạo Edge không proxy.
-        Không dùng fallback.
-        """
-        try:
-            options = self._build_edge_options(proxy=self.proxy)
-            return webdriver.Edge(options=options)
-        except Exception as error:
-            if self.proxy:
-                raise RuntimeError(
-                    f"Khởi tạo Edge driver thất bại với proxy '{self.proxy}'. Chi tiết: {error}"
-                ) from error
 
-            raise RuntimeError(
-                f"Khởi tạo Edge driver thất bại khi không dùng proxy. Chi tiết: {error}"
-            ) from error
-
-    def login_and_capture_cookies(self):
-        driver = self._create_driver()
-
-        try:
-            driver.get(self.login_url)
-
-            print("Đăng nhập trên cửa sổ Edge vừa mở.")
-            input("Đăng nhập xong, nhấn Enter để tiếp tục ...")
-
-            WebDriverWait(driver, 30).until(lambda d: len(d.get_cookies()) > 0)
-
-            cookies = driver.get_cookies()
-
-            jsessionid = None
-            d1n = None
-
-            for c in cookies:
-                name = c.get("name", "").lower()
-                if name == "jsessionid":
-                    jsessionid = c.get("value")
-                elif name == "d1n":
-                    d1n = c.get("value")
-
-            if not d1n:
-                page_source = driver.page_source or ""
-                match = re.search(r"D1N=([a-fA-F0-9]+)", page_source)
-                if match:
-                    d1n = match.group(1)
-
-            if not jsessionid:
-                raise ValueError("Không lấy được JSESSIONID từ phiên Selenium.")
-            if not d1n:
-                raise ValueError("Không lấy được D1N từ phiên Selenium/HTML.")
-
-            self.jsessionid = jsessionid
-            self.d1n = d1n
-
-            self.session.cookies.set("D1N", self.d1n, domain=self.cookie_domain, path="/")
-            self.session.cookies.set("JSESSIONID", self.jsessionid, domain=self.cookie_domain, path="/")
-        finally:
-            driver.quit()
-
-    def get_customer_info(self):
-        if not self.d1n or not self.jsessionid:
-            raise ValueError("Chưa có D1N/JSESSIONID. Hãy gọi login_and_capture_cookies() trước.")
-
-        params = {
-            "user_name": self.customer_account,
-            "_fields": "user_name",
-        }
-
-        resp = self.session.get(
-            self.customer_api_url,
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-
-        data = resp.json()
-        rows = data.get("data", {}).get("rows", [])
-        if not rows:
-            raise ValueError(f"Không tìm thấy customer cho user_name={self.customer_account}")
-
-        row = rows[0]
-        self.customer_id = row.get("_id")
-        self.distributor_id = row.get("distributor_id")
-
-        if not self.customer_id or not self.distributor_id:
-            raise ValueError("Thiếu customer_id hoặc distributor_id trong response.")
-
-        return self.customer_id, self.distributor_id
-
-    def get_domains(self):
-        if not self.distributor_id:
-            raise ValueError("distributor_id chưa có. Hãy gọi get_customer_info() trước.")
-
-        params = {
-            "distributor_id": self.distributor_id,
-            "user_name": self.customer_account,
-        }
-
-        resp = self.session.get(
-            self.domain_api_url,
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-
-        data = resp.json()
-        domain_names = data.get("data", [])
-        if not isinstance(domain_names, list):
-            raise ValueError("Trường 'data' không phải list domain.")
-
-        self.domain_names = domain_names
-        print(f"domains ({len(self.domain_names)}): {self.domain_names}")
-        return self.domain_names
-
-    def get_export_url(self) -> str:
-        if self.report_type == "events":
-            return self.export_events_api_url
-        return self.export_attacks_api_url
-
-    def build_export_payload(self) -> dict:
-        payload = {
-            "start_date": self.start_date,
-            "end_date": self.end_date,
-            "customer_id": self.customer_id,
-            "domain_names": self.domain_names,
-            "distributor_id": self.distributor_id,
-            "lang": "vi",
-        }
-
-        if self.report_type == "events":
-            payload["action"] = ["block"]
-            payload["protect_mode"] = ["on"]
-
-        return payload
-
-    def build_export_cookies(self) -> dict:
-        if self.report_type == "events":
-            return {
-                "D1N": self.d1n,
-                "JSESSIONID": self.jsessionid,
-                "cp_distid": str(self.distributor_id),
-                "customer_id": str(self.customer_id),
-            }
-
-        return {
-            "D1N": self.d1n,
-            "JSESSIONID": self.jsessionid,
-            "cp_distid": str(self.distributor_id),
-        }
-
-    def build_output_path(self) -> Path:
-        output_dir = Path("../reports") / self.customer_account
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        timestamp = int(time.time())
-
-        if self.report_type == "events":
-            filename = (
-                f"events_{self.customer_account}_{self.start_date}_{self.end_date}_{timestamp}.xlsx"
-            )
+def get_top_ip_with_nation(counter_ip: Counter, ip_nation_map: dict, top_k: int, total_events: int):
+    result = []
+    for ip, count in counter_ip.most_common(top_k):
+        nation_counter = ip_nation_map.get(ip, Counter())
+        if nation_counter:
+            nation, _ = nation_counter.most_common(1)[0]
         else:
-            filename = (
-                f"attacks_{self.customer_account}_{self.start_date}_{self.end_date}_{timestamp}.pdf"
-            )
+            nation = "Unknown"
 
-        return output_dir / filename
+        percent = (count / total_events * 100) if total_events > 0 else 0.0
 
-    def export_report(self) -> Path:
-        if not self.customer_id or not self.distributor_id:
-            raise ValueError("Thiếu customer_id/distributor_id. Hãy gọi get_customer_info() trước.")
-        if self.domain_names is None:
-            raise ValueError("Danh sách domain chưa được khởi tạo. Hãy gọi get_domains() trước.")
+        result.append({
+            "ip": ip,
+            "count": count,
+            "nation": nation,
+            "percent": percent,
+        })
+    return result
 
-        payload = self.build_export_payload()
-        export_url = self.get_export_url()
-        cookies = self.build_export_cookies()
 
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-        }
+def format_top_ip_with_nation(top_ip_data):
+    lines = []
+    title = "TOP IPs và quốc gia tương ứng"
+    lines.append(title)
+    lines.append("-" * len(title))
 
-        resp = self.session.post(
-            export_url,
-            json=payload,
-            headers=headers,
-            cookies=cookies,
-            timeout=120,
+    if not top_ip_data:
+        lines.append("Không có dữ liệu.")
+        return lines
+
+    for idx, item in enumerate(top_ip_data, start=1):
+        percent_str = f"{item['percent']:.2f}".replace(".", ",")
+        lines.append(
+            f"{idx:>2}. IP: {item['ip']} -> {item['count']} ({percent_str}%) | Nation: {item['nation']}"
         )
-        resp.raise_for_status()
+    return lines
 
-        output_path = self.build_output_path()
-        with open(output_path, "wb") as f:
-            f.write(resp.content)
 
-        print(f"Saved report: {output_path.resolve()}")
-        return output_path
+def format_top(counter: Counter, title: str, top_k: int):
+    lines = []
+    lines.append(title)
+    lines.append("-" * len(title))
+
+    if not counter:
+        lines.append("Không có dữ liệu.")
+        return lines
+
+    for idx, (value, count) in enumerate(counter.most_common(top_k), start=1):
+        lines.append(f"{idx:>2}. {value} -> {count}")
+    return lines
+
+
+def format_all_attack_types(title: str, attack_counter: Counter):
+    lines = []
+    lines.append(title)
+    lines.append("-" * len(title))
+
+    if not attack_counter:
+        lines.append("Không có dữ liệu.")
+        return lines
+
+    total_attack_type_count = sum(attack_counter.values())
+
+    for idx, (attack_type, count) in enumerate(attack_counter.most_common(), start=1):
+        percent = (count / total_attack_type_count * 100) if total_attack_type_count > 0 else 0.0
+        percent_str = f"{percent:.2f}".replace(".", ",")
+        lines.append(f"{idx:>2}. {attack_type} -> {percent_str}% ({count})")
+
+    return lines
+
+
+def handle_events(folder_path: Path, top_k: int):
+    excel_files = list(folder_path.rglob("*.xlsx"))
+
+    section_lines = []
+    section_lines.append("=" * 60)
+    section_lines.append("EVENTS REPORT")
+    section_lines.append("=" * 60)
+
+    if not excel_files:
+        section_lines.append("Không tìm thấy file .xlsx nào.")
+        return section_lines
+
+    total_counter_ip = Counter()
+    total_counter_url = Counter()
+    total_ip_nation_map = defaultdict(Counter)
+    grand_total_rows = 0
+
+    section_lines.append(f"Tổng hợp {len(excel_files)} file .xlsx")
+    section_lines.append("")
+
+    for file_path in excel_files:
+        try:
+            counter_ip, counter_url, ip_nation_map, file_rows = process_excel_file(file_path)
+
+            total_counter_ip.update(counter_ip)
+            total_counter_url.update(counter_url)
+            grand_total_rows += file_rows
+
+            for ip, nation_counter in ip_nation_map.items():
+                total_ip_nation_map[ip].update(nation_counter)
+
+            section_lines.append(f"Đã xử lý: {file_path} | Số event: {file_rows}")
+        except Exception as e:
+            section_lines.append(f"Lỗi khi đọc file {file_path}: {e}")
+
+    top_ip_data = get_top_ip_with_nation(
+        total_counter_ip,
+        total_ip_nation_map,
+        top_k,
+        grand_total_rows,
+    )
+
+    section_lines.append("")
+    section_lines.append(f"TỔNG số events ở tất cả file: {grand_total_rows}")
+    section_lines.append("")
+    section_lines.extend(format_top_ip_with_nation(top_ip_data))
+    section_lines.append("")
+    section_lines.extend(format_top(total_counter_url, f"TOP {top_k} URLs", top_k))
+
+    return section_lines
+
+
+def handle_attacks(folder_path: Path):
+    pdf_files = list(folder_path.rglob("*.pdf"))
+
+    section_lines = []
+    section_lines.append("=" * 60)
+    section_lines.append("ATTACKS REPORT")
+    section_lines.append("=" * 60)
+
+    if not pdf_files:
+        section_lines.append("Không tìm thấy file .pdf nào.")
+        return section_lines
+
+    grand_total_web = 0
+    grand_total_ddos = 0
+    web_attack_counter = Counter()
+    ddos_attack_counter = Counter()
+
+    section_lines.append(f"Tổng hợp {len(pdf_files)} file .pdf")
+    section_lines.append("")
+
+    for file_path in pdf_files:
+        try:
+            result = process_pdf_file(file_path)
+
+            grand_total_web += result["web_total"]
+            grand_total_ddos += result["ddos_total"]
+
+            for item in result["web_attack_types"]:
+                web_attack_counter[item["type"]] += item["count"]
+
+            for item in result["ddos_attack_types"]:
+                ddos_attack_counter[item["type"]] += item["count"]
+
+            section_lines.append(
+                f"Đã xử lý: {file_path} | Web attacks: {result['web_total']} | DDoS attacks: {result['ddos_total']}"
+            )
+        except Exception as e:
+            section_lines.append(f"Lỗi khi đọc file {file_path}: {e}")
+
+    section_lines.append("")
+    section_lines.append(f"TỔNG số cuộc tấn công lỗ hổng web: {grand_total_web}")
+    section_lines.append(f"TỔNG số cuộc tấn công DDoS: {grand_total_ddos}")
+    section_lines.append("")
+    section_lines.extend(
+        format_all_attack_types(
+            "Các loại tấn công khai thác lỗ hổng",
+            web_attack_counter,
+        )
+    )
+    section_lines.append("")
+    section_lines.extend(
+        format_all_attack_types(
+            "Các loại tấn công DDoS",
+            ddos_attack_counter,
+        )
+    )
+
+    return section_lines
 
 
 def main():
-    args = parse_args()
-    config = load_config(Path(args.config))
+    folder_path, top_k = parse_args()
+    output_file = build_output_file(folder_path)
 
-    base_url = str(config["export_base_url"]).strip()
+    report_lines = []
+    report_lines.append(f"THƯ MỤC BÁO CÁO: {folder_path}")
+    report_lines.append("")
 
-    client = CloudClient(
-        customer_account=args.customer_account,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        report_type=args.report_type,
-        base_url=base_url,
-        proxy=args.proxy,
-    )
+    events_lines = handle_events(folder_path, top_k)
+    attacks_lines = handle_attacks(folder_path)
 
-    try:
-        client.login_and_capture_cookies()
-        client.get_customer_info()
-        client.get_domains()
-        client.export_report()
-        print("Hoàn thành.")
-    except requests.HTTPError as e:
-        print(f"HTTP error: {e}", file=sys.stderr)
-        if e.response is not None:
-            print(f"Response status: {e.response.status_code}", file=sys.stderr)
-            body_preview = e.response.text[:2000] if e.response.text else ""
-            print(f"Response body: {body_preview}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    report_lines.extend(events_lines)
+    report_lines.append("")
+    report_lines.extend(attacks_lines)
+    report_lines.append("")
+
+    for line in report_lines:
+        print(line)
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for line in report_lines:
+            f.write(line + "\n")
+
+    print(f"\nĐã ghi report ra file: {output_file}")
 
 
 if __name__ == "__main__":
