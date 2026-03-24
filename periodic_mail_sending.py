@@ -14,7 +14,6 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from datetime import datetime, timedelta, timezone
 
-os.environ["SE_PROXY"] = "http://192.168.5.8:3128"
 
 BANGKOK_TZ = timezone(timedelta(hours=7))
 USER_AGENT = (
@@ -23,10 +22,27 @@ USER_AGENT = (
     "Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
 )
 
-EXPORT_API_URL = "https://confluence.viettelcyber.com/plugins/servlet/scroll-office/api/exports"
 EXPORT_TEMPLATE_ID = "4e9c2265-c90e-456a-a5d7-5c7fe09342e5"
 EXPORT_VARIANT_ID = "7F0000010175551BAE4736E652E83540"
-DOWNLOAD_DIR = Path("E:/bao-cao-ca")
+DOWNLOAD_DIR = Path("../bao-cao-ca")
+
+
+def load_json_file(file_name: str):
+    base_dir = Path(__file__).resolve().parent
+    file_path = base_dir / file_name
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_config():
+    return load_json_file("config.json")
+
+
+CONFIG = load_config()
+
+if CONFIG.get("proxy"):
+    os.environ["SE_PROXY"] = CONFIG["proxy"].strip()
+
 
 def parse_page_id(report_url: str) -> str:
     parsed = urlparse(report_url)
@@ -35,6 +51,7 @@ def parse_page_id(report_url: str) -> str:
     if not page_ids:
         raise ValueError("Missing pageId trong URL")
     return page_ids[0]
+
 
 def create_requests_session(jsessionid: str) -> requests.Session:
     session = requests.Session()
@@ -49,10 +66,15 @@ def create_edge_driver():
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
     return webdriver.Edge(options=options)
 
+
 def login_sso_and_get_session_info() -> tuple[str, str]:
     driver = create_edge_driver()
     try:
-        driver.get("https://confluence.viettelcyber.com")
+        start_url = CONFIG.get("baocaoca_start_url", "").strip()
+        if not start_url:
+            raise ValueError("Thiếu baocaoca_start_url trong config.json")
+
+        driver.get(start_url)
 
         print("Cửa sổ Edge đã mở.")
         print("Vui lòng đăng nhập SSO trên cửa sổ này, sau đó truy cập trang báo cáo cần export.")
@@ -82,10 +104,12 @@ def login_sso_and_get_session_info() -> tuple[str, str]:
     finally:
         driver.quit()
 
+
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
     resp = session.get(report_url, timeout=60)
     resp.raise_for_status()
     return resp.text
+
 
 def extract_staffs_from_html(html: str):
     soup = BeautifulSoup(html, "lxml")
@@ -116,11 +140,6 @@ def extract_staffs_from_html(html: str):
 
     return report_title, prev_staffs_vec, curr_staffs_vec
 
-def load_json_file(file_name: str):
-    base_dir = Path(__file__).resolve().parent
-    file_path = base_dir / file_name
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
     sender_map = load_json_file("mail_sender_staffs.json")
@@ -132,6 +151,7 @@ def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
     raise ValueError(
         "Không tìm thấy username nào trong curr_staffs có trong file mail_sender_staffs.json."
     )
+
 
 def build_export_payload(page_id: str) -> dict:
     return {
@@ -184,11 +204,16 @@ def build_export_payload(page_id: str) -> dict:
         "debugMode": False,
     }
 
+
 def start_export_job(session: requests.Session, page_id: str) -> str:
+    export_api_url = CONFIG.get("baocaoca_export_api_url", "").strip()
+    if not export_api_url:
+        raise ValueError("Thiếu baocaoca_export_api_url trong config.json")
+
     payload = build_export_payload(page_id)
 
     resp = session.post(
-        EXPORT_API_URL,
+        export_api_url,
         headers={"Content-Type": "application/json"},
         json=payload,
         timeout=60,
@@ -203,8 +228,13 @@ def start_export_job(session: requests.Session, page_id: str) -> str:
 
     return job_id
 
+
 def wait_for_download_url(session: requests.Session, job_id: str) -> str:
-    status_url = f"{EXPORT_API_URL}/{job_id}/status"
+    export_api_url = CONFIG.get("baocaoca_export_api_url", "").strip()
+    if not export_api_url:
+        raise ValueError("Thiếu baocaoca_export_api_url trong config.json")
+
+    status_url = f"{export_api_url}/{job_id}/status"
 
     while True:
         resp = session.get(status_url, timeout=60)
@@ -217,6 +247,7 @@ def wait_for_download_url(session: requests.Session, job_id: str) -> str:
             return download_url
 
         time.sleep(5)
+
 
 def download_export_file(session: requests.Session, download_url: str) -> Path:
     resp = session.get(download_url, timeout=120)
@@ -233,8 +264,6 @@ def download_export_file(session: requests.Session, download_url: str) -> Path:
 
     return file_path
 
-def load_smtp_config():
-    return load_json_file("smtp_config.json")
 
 def build_mail_subject_and_shift():
     now = datetime.now(BANGKOK_TZ)
@@ -300,6 +329,7 @@ def build_email_message(
 
     return msg
 
+
 def send_handover_email(
     prev_staffs: str,
     curr_staffs: str,
@@ -309,8 +339,6 @@ def send_handover_email(
     file_path: Path,
     receivers: list[str],
 ):
-    smtp_config = load_smtp_config()
-
     msg = build_email_message(
         prev_staffs=prev_staffs,
         curr_staffs=curr_staffs,
@@ -319,15 +347,16 @@ def send_handover_email(
         report_url=report_url,
         file_path=file_path,
         receivers=receivers,
-        mail_from=smtp_config["mail_from"],
+        mail_from=CONFIG["mail_from"],
     )
 
-    with smtplib.SMTP_SSL(smtp_config["smtp_host"], 465, timeout=60) as server:
+    with smtplib.SMTP_SSL(CONFIG["smtp_host"], 465, timeout=60) as server:
         server.login(
-            smtp_config["smtp_username"],
-            smtp_config["smtp_password"],
+            CONFIG["smtp_username"],
+            CONFIG["smtp_password"],
         )
         server.send_message(msg)
+
 
 def run():
     report_url, jsessionid = login_sso_and_get_session_info()
@@ -348,9 +377,9 @@ def run():
 
     sender_fullname = resolve_sender_fullname(curr_staffs_vec)
 
-    receivers = [
-        "",
-    ]
+    receivers = CONFIG.get("mail_to", [])
+    if not isinstance(receivers, list):
+        raise ValueError("mail_to trong config.json phải là list")
 
     job_id = start_export_job(session, page_id)
     download_url = wait_for_download_url(session, job_id)
@@ -369,6 +398,7 @@ def run():
     )
 
     print("Gửi mail thành công")
+
 
 if __name__ == "__main__":
     try:
