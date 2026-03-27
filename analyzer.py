@@ -12,7 +12,7 @@ except ImportError:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Tổng hợp report từ file xlsx và pdf trong một hoặc nhiều thư mục."
+        description="Tổng hợp report từ file xlsx và pdf trong một hoặc nhiều thư mục"
     )
     parser.add_argument(
         "--folder",
