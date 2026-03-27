@@ -13,13 +13,14 @@ except ImportError:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Tổng hợp report từ file xlsx và pdf trong cùng thư mục."
+        description="Tổng hợp report từ file xlsx và pdf trong một hoặc nhiều thư mục."
     )
     parser.add_argument(
         "--folder",
         required=True,
+        nargs="+",
         type=str,
-        help="Đường dẫn thư mục chứa file báo cáo",
+        help="Một hoặc nhiều thư mục chứa file báo cáo, ví dụ: --folder folder_a folder_b",
     )
     parser.add_argument(
         "--top-k",
@@ -30,21 +31,41 @@ def parse_args():
 
     args = parser.parse_args()
 
-    folder = Path(args.folder)
-    if not folder.exists() or not folder.is_dir():
-        parser.error(f"Thư mục không tồn tại hoặc không hợp lệ: {folder}")
+    folder_paths = []
+    for folder_str in args.folder:
+        folder = Path(folder_str)
+        if not folder.exists() or not folder.is_dir():
+            parser.error(f"Thư mục không tồn tại hoặc không hợp lệ: {folder}")
+        folder_paths.append(folder)
 
     if args.top_k <= 0:
         parser.error("--top-k phải là số nguyên dương.")
 
-    return folder, args.top_k
+    return folder_paths, args.top_k
 
 
-def build_output_file(folder_path: Path) -> Path:
-    folder_name = folder_path.name.strip()
-    if not folder_name:
-        folder_name = "default"
-    return folder_path / f"{folder_name}_report.txt"
+def build_output_file(folder_paths: list[Path]) -> Path:
+    if len(folder_paths) == 1:
+        folder_name = folder_paths[0].name.strip() or "default"
+        return folder_paths[0] / f"{folder_name}_report.txt"
+
+    base_dir = folder_paths[0].parent
+    joined_names = "_".join(
+        (folder.name.strip() or f"folder_{idx + 1}")
+        for idx, folder in enumerate(folder_paths)
+    )
+    return base_dir / f"{joined_names}_report.txt"
+
+
+def collect_files(folder_paths: list[Path]):
+    excel_files = []
+    pdf_files = []
+
+    for folder_path in folder_paths:
+        excel_files.extend(folder_path.rglob("*.xlsx"))
+        pdf_files.extend(folder_path.rglob("*.pdf"))
+
+    return excel_files, pdf_files
 
 
 def normalize_cell_value(value) -> str | None:
@@ -313,9 +334,7 @@ def format_all_attack_types(title: str, attack_counter: Counter):
     return lines
 
 
-def handle_events(folder_path: Path, top_k: int):
-    excel_files = list(folder_path.rglob("*.xlsx"))
-
+def handle_events(excel_files: list[Path], top_k: int):
     section_lines = []
     section_lines.append("=" * 60)
     section_lines.append("EVENTS REPORT")
@@ -378,9 +397,7 @@ def handle_events(folder_path: Path, top_k: int):
     return section_lines
 
 
-def handle_attacks(folder_path: Path):
-    pdf_files = list(folder_path.rglob("*.pdf"))
-
+def handle_attacks(pdf_files: list[Path]):
     section_lines = []
     section_lines.append("=" * 60)
     section_lines.append("ATTACKS REPORT")
@@ -439,15 +456,21 @@ def handle_attacks(folder_path: Path):
 
 
 def main():
-    folder_path, top_k = parse_args()
-    output_file = build_output_file(folder_path)
+    folder_paths, top_k = parse_args()
+    output_file = build_output_file(folder_paths)
+
+    excel_files, pdf_files = collect_files(folder_paths)
 
     report_lines = []
-    report_lines.append(f"THƯ MỤC BÁO CÁO: {folder_path}")
+    report_lines.append("TỔNG HỢP BÁO CÁO")
+    report_lines.append("=" * 80)
+    report_lines.append("Các thư mục đầu vào:")
+    for folder_path in folder_paths:
+        report_lines.append(f"- {folder_path}")
     report_lines.append("")
 
-    events_lines = handle_events(folder_path, top_k)
-    attacks_lines = handle_attacks(folder_path)
+    events_lines = handle_events(excel_files, top_k)
+    attacks_lines = handle_attacks(pdf_files)
 
     report_lines.extend(events_lines)
     report_lines.append("")

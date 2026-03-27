@@ -6,21 +6,21 @@ from pathlib import Path
 from datetime import datetime
 
 
-def valid_month(value: str) -> str:
+def valid_date(value: str) -> str:
     try:
-        datetime.strptime(value, "%Y-%m")
+        datetime.strptime(value, "%Y-%m-%d")
         return value
-    except ValueError:
+    except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"Tháng không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM"
-        )
+            f"Ngày không hợp lệ: '{value}'. Định dạng đúng là YYYY-MM-DD"
+        ) from exc
 
 
 def valid_top_k(value: str) -> int:
     try:
         k = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError("--top-k phải là số nguyên dương")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--top-k phải là số nguyên dương") from exc
 
     if k <= 0:
         raise argparse.ArgumentTypeError("--top-k phải lớn hơn 0")
@@ -30,18 +30,25 @@ def valid_top_k(value: str) -> int:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Export report theo tháng rồi chạy analyzer"
+        description="Export report theo khoảng ngày rồi chạy analyzer"
     )
     parser.add_argument(
         "--customer_account",
+        nargs="+",
         required=True,
-        help="Tên tài khoản customer",
+        help="Một hoặc nhiều tài khoản customer, ví dụ: --customer_account abc def",
     )
     parser.add_argument(
-        "--month",
+        "--start_date",
         required=True,
-        type=valid_month,
-        help="Tháng cần export, định dạng YYYY-MM",
+        type=valid_date,
+        help="Ngày bắt đầu, định dạng YYYY-MM-DD",
+    )
+    parser.add_argument(
+        "--end_date",
+        required=True,
+        type=valid_date,
+        help="Ngày kết thúc, định dạng YYYY-MM-DD",
     )
     parser.add_argument(
         "--top-k",
@@ -53,10 +60,18 @@ def parse_args():
         "--from",
         dest="run_from",
         required=True,
-        choices=["NOC-PC", "NOC-LAPTOP"],
-        help="Nguồn chạy script: NOC-PC hoặc NOC-LAPTOP",
+        choices=["DESKTOP", "LAPTOP"],
+        help="Nguồn chạy script: DESKTOP hoặc LAPTOP",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    start_dt = datetime.strptime(args.start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(args.end_date, "%Y-%m-%d")
+    if start_dt > end_dt:
+        parser.error("--start_date phải nhỏ hơn hoặc bằng --end_date")
+
+    return args
 
 
 def run_command(cmd: list[str], step_name: str):
@@ -76,25 +91,33 @@ def remove_reports_folder(folder: Path):
         shutil.rmtree(folder)
 
 
+def build_reports_folders(customer_accounts: list[str]) -> list[Path]:
+    return [Path("..") / "reports" / customer_account for customer_account in customer_accounts]
+
+
 def main():
     args = parse_args()
 
-    customer_account = args.customer_account
-    month = args.month
+    customer_accounts = args.customer_account
+    start_date = args.start_date
+    end_date = args.end_date
     top_k = args.top_k
     run_from = args.run_from
 
-    reports_folder = Path("..") / "reports" / customer_account
+    reports_folders = build_reports_folders(customer_accounts)
 
-    remove_reports_folder(reports_folder)
+    for reports_folder in reports_folders:
+        remove_reports_folder(reports_folder)
 
     export_cmd = [
         sys.executable,
         ".\\all_domains_report_downloader.py",
         "--customer_account",
-        customer_account,
-        "--month",
-        month,
+        *customer_accounts,
+        "--start_date",
+        start_date,
+        "--end_date",
+        end_date,
         "--from",
         run_from,
     ]
@@ -103,12 +126,12 @@ def main():
         sys.executable,
         ".\\analyzer.py",
         "--folder",
-        str(reports_folder),
+        *[str(folder) for folder in reports_folders],
         "--top-k",
         str(top_k),
     ]
 
-    run_command(export_cmd, "Export report theo tháng")
+    run_command(export_cmd, "Export report theo khoảng ngày")
     run_command(analyze_cmd, "Phân tích report")
 
     print("\nHoàn thành toàn bộ quy trình.")
