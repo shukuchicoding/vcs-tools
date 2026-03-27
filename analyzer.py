@@ -2,7 +2,6 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from openpyxl import load_workbook
 import argparse
-import sys
 import re
 
 try:
