@@ -84,14 +84,34 @@ def create_requests_session(access_token: str) -> requests.Session:
         {
             "User-Agent": USER_AGENT,
             "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+            "X-Atlassian-Token": "no-check",
         }
     )
     return session
 
 
+def warmup_confluence_session(session: requests.Session, report_url: str) -> None:
+    """
+    Một số plugin export của Confluence/Scroll vẫn phụ thuộc HTTP session
+    trong quá trình render, dù request dùng Bearer token.
+    Gọi trước trang báo cáo để server cấp/ghi nhận JSESSIONID nếu có.
+    """
+    resp = session.get(report_url, timeout=60)
+    print(f"Warm-up report page status: {resp.status_code}")
+    resp.raise_for_status()
+
+    cookie_names = [cookie.name for cookie in session.cookies]
+    if cookie_names:
+        print(f"Session cookies received: {', '.join(cookie_names)}")
+    else:
+        print("Cảnh báo: server không trả cookie session sau warm-up.", file=sys.stderr)
+
+
 
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
     resp = session.get(report_url, timeout=60)
+    print(f"Fetch report HTML status: {resp.status_code}")
     resp.raise_for_status()
     return resp.text
 
@@ -197,9 +217,18 @@ def start_export_job(session: requests.Session, page_id: str) -> str:
 
     payload = build_export_payload(page_id)
 
+    request_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Atlassian-Token": "no-check",
+    }
+    base_url = CONFIG.get("baocaoca_base_url", "").strip()
+    if base_url:
+        request_headers["Referer"] = base_url
+
     resp = session.post(
         export_api_url,
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         json=payload,
         timeout=60,
     )
@@ -220,9 +249,15 @@ def wait_for_download_url(session: requests.Session, job_id: str) -> str:
         raise ValueError("Thiếu baocaoca_export_api_url trong config.json")
 
     status_url = f"{export_api_url}/{job_id}/status"
+    max_wait_seconds = int(CONFIG.get("export_max_wait_seconds", 900))
+    start_time = time.time()
 
     while True:
-        resp = session.get(status_url, timeout=60)
+        resp = session.get(
+            status_url,
+            headers={"Accept": "application/json", "X-Atlassian-Token": "no-check"},
+            timeout=60,
+        )
         print(f"Polling status: {resp.status_code}")
         resp.raise_for_status()
 
@@ -230,6 +265,26 @@ def wait_for_download_url(session: requests.Session, job_id: str) -> str:
         download_url = data.get("downloadUrl")
         if download_url:
             return download_url
+
+        status = str(data.get("status") or data.get("state") or "").lower()
+        error_message = (
+            data.get("errorMessage")
+            or data.get("message")
+            or data.get("error")
+            or data.get("stackTrace")
+        )
+
+        if status in {"failed", "failure", "error", "cancelled", "canceled"} or error_message:
+            raise RuntimeError(
+                "Export job failed. "
+                f"job_id={job_id}, status={status or 'unknown'}, response={json.dumps(data, ensure_ascii=False)[:4000]}"
+            )
+
+        if time.time() - start_time > max_wait_seconds:
+            raise TimeoutError(
+                f"Export job timeout sau {max_wait_seconds}s. "
+                f"job_id={job_id}, last_response={json.dumps(data, ensure_ascii=False)[:4000]}"
+            )
 
         time.sleep(5)
 
@@ -350,6 +405,7 @@ def run():
 
     session = create_requests_session(access_token)
 
+    warmup_confluence_session(session, report_url)
     html = fetch_report_html(session, report_url)
     report_title, prev_staffs_vec, curr_staffs_vec = extract_staffs_from_html(html)
 
