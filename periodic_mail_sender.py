@@ -1,4 +1,3 @@
-import argparse
 import json
 import sys
 import time
@@ -10,6 +9,9 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
 from datetime import datetime, timedelta, timezone
 
 
@@ -51,137 +53,60 @@ def parse_page_id(report_url: str) -> str:
     return page_ids[0]
 
 
-def get_confluence_access_token() -> str:
-    token = (
-        CONFIG.get("confluence_access_token")
-        or CONFIG.get("baocaoca_access_token")
-        or CONFIG.get("access_token")
-    )
-    if not token or not str(token).strip():
-        raise ValueError(
-            "Thiếu access token trong config.json. "
-            "Hãy cấu hình confluence_access_token."
-        )
-    return str(token).strip()
-
-
-def parse_cli_args():
-    parser = argparse.ArgumentParser(
-        description="Export báo cáo Confluence bằng Bearer token và gửi email."
-    )
-    parser.add_argument(
-        "report_url",
-        help="URL trang báo cáo Confluence, bắt buộc có query pageId.",
-    )
-    parser.add_argument(
-        "--jsessionid",
-        default=None,
-        help=(
-            "Tuỳ chọn. JSESSIONID có sẵn để dùng cho Scroll/K15t exporter nếu plugin "
-            "không chạy ổn định với Bearer-only authentication."
-        ),
-    )
-    parser.add_argument(
-        "--cookie",
-        default=None,
-        help=(
-            "Tuỳ chọn. Cookie header đầy đủ, ví dụ: "
-            "'JSESSIONID=abc; seraph.confluence=xyz'. Ưu tiên cao hơn --jsessionid."
-        ),
-    )
-    return parser.parse_args()
-
-
-def validate_report_url(report_url: str) -> str:
-    report_url = report_url.strip()
-    if "pageId=" not in report_url:
-        raise ValueError(f"URL báo cáo không hợp lệ hoặc không chứa pageId: {report_url}")
-    return report_url
-
-
-def get_optional_confluence_cookie(args) -> str | None:
-    cookie = (
-        args.cookie
-        or os.environ.get("CONFLUENCE_COOKIE")
-        or CONFIG.get("confluence_cookie")
-    )
-    if cookie and str(cookie).strip():
-        return str(cookie).strip()
-
-    jsessionid = (
-        args.jsessionid
-        or os.environ.get("CONFLUENCE_JSESSIONID")
-        or CONFIG.get("confluence_jsessionid")
-    )
-    if jsessionid and str(jsessionid).strip():
-        return f"JSESSIONID={str(jsessionid).strip()}"
-
-    return None
-
-
-def create_requests_session(access_token: str, confluence_cookie: str | None = None) -> requests.Session:
+def create_requests_session(jsessionid: str) -> requests.Session:
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": USER_AGENT,
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
-            "X-Atlassian-Token": "no-check",
-        }
-    )
-
-    if confluence_cookie:
-        session.headers.update({"Cookie": confluence_cookie})
-        print("Đã cấu hình Cookie/JSESSIONID cho Confluence session.")
-
+    session.headers.update({"User-Agent": USER_AGENT})
+    session.cookies.set("JSESSIONID", jsessionid)
     return session
 
 
-def get_current_jsessionid(session: requests.Session) -> str | None:
-    for cookie in session.cookies:
-        if cookie.name.upper() == "JSESSIONID":
-            return cookie.value
-
-    cookie_header = session.headers.get("Cookie", "")
-    for part in cookie_header.split(";"):
-        key_value = part.strip().split("=", 1)
-        if len(key_value) == 2 and key_value[0].upper() == "JSESSIONID":
-            return key_value[1]
-
-    return None
+def create_edge_driver():
+    options = Options()
+    options.add_argument("--log-level=3")
+    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    return webdriver.Edge(options=options)
 
 
-def print_current_jsessionid(session: requests.Session, stage: str) -> None:
-    jsessionid = get_current_jsessionid(session)
-    if jsessionid:
-        print(f"[{stage}] JSESSIONID={jsessionid}")
-    else:
-        print(f"[{stage}] JSESSIONID=<not found>")
+def login_sso_and_get_session_info() -> tuple[str, str]:
+    driver = create_edge_driver()
+    try:
+        start_url = CONFIG.get("baocaoca_start_url", "").strip()
+        if not start_url:
+            raise ValueError("Thiếu baocaoca_start_url trong config.json")
 
+        driver.get(start_url)
 
-def warmup_confluence_session(session: requests.Session, report_url: str) -> None:
-    """
-    Một số plugin export của Confluence/Scroll vẫn phụ thuộc HTTP session
-    trong quá trình render, dù request dùng Bearer token.
-    Gọi trước trang báo cáo để server cấp/ghi nhận JSESSIONID nếu có.
-    """
-    resp = session.get(report_url, timeout=60)
-    print(f"Warm-up report page status: {resp.status_code}")
-    resp.raise_for_status()
+        print("Cửa sổ Edge đã mở.")
+        print("Vui lòng đăng nhập SSO trên cửa sổ này, sau đó truy cập trang báo cáo cần export.")
+        input("Khi đã mở đúng trang báo cáo, nhấn Enter để tiếp tục ...")
 
-    cookie_names = [cookie.name for cookie in session.cookies]
-    if cookie_names:
-        print(f"Session cookies received: {', '.join(cookie_names)}")
-    else:
-        print("Cảnh báo: server không trả cookie session sau warm-up.", file=sys.stderr)
+        report_url = driver.current_url
+        if not report_url or "pageId=" not in report_url:
+            raise ValueError(
+                f"URL hiện tại không hợp lệ hoặc không chứa pageId: {report_url}"
+            )
 
-    print_current_jsessionid(session, "after warm-up")
+        WebDriverWait(driver, 30).until(
+            lambda d: d.get_cookie("JSESSIONID") is not None
+            or d.get_cookie("jsessionid") is not None
+        )
 
+        cookie = driver.get_cookie("JSESSIONID") or driver.get_cookie("jsessionid")
+        if not cookie or "value" not in cookie:
+            raise ValueError("Không lấy được JSESSIONID sau khi đăng nhập SSO.")
+
+        jsessionid = cookie["value"]
+
+        print(f"Current report URL: {report_url}")
+
+        return report_url, jsessionid
+
+    finally:
+        driver.quit()
 
 
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
     resp = session.get(report_url, timeout=60)
-    print(f"Fetch report HTML status: {resp.status_code}")
     resp.raise_for_status()
     return resp.text
 
@@ -280,26 +205,16 @@ def build_export_payload(page_id: str) -> dict:
     }
 
 
-def start_export_job(session: requests.Session, page_id: str, report_url: str) -> str:
+def start_export_job(session: requests.Session, page_id: str) -> str:
     export_api_url = CONFIG.get("baocaoca_export_api_url", "").strip()
     if not export_api_url:
         raise ValueError("Thiếu baocaoca_export_api_url trong config.json")
 
     payload = build_export_payload(page_id)
 
-    print_current_jsessionid(session, "before start export")
-
-    request_headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-Atlassian-Token": "no-check",
-        "Referer": report_url,
-        "Origin": f"{urlparse(report_url).scheme}://{urlparse(report_url).netloc}",
-    }
-
     resp = session.post(
         export_api_url,
-        headers=request_headers,
+        headers={"Content-Type": "application/json"},
         json=payload,
         timeout=60,
     )
@@ -320,17 +235,9 @@ def wait_for_download_url(session: requests.Session, job_id: str) -> str:
         raise ValueError("Thiếu baocaoca_export_api_url trong config.json")
 
     status_url = f"{export_api_url}/{job_id}/status"
-    max_wait_seconds = int(CONFIG.get("export_max_wait_seconds", 900))
-    start_time = time.time()
 
     while True:
-        print_current_jsessionid(session, "before polling export status")
-
-        resp = session.get(
-            status_url,
-            headers={"Accept": "application/json", "X-Atlassian-Token": "no-check"},
-            timeout=60,
-        )
+        resp = session.get(status_url, timeout=60)
         print(f"Polling status: {resp.status_code}")
         resp.raise_for_status()
 
@@ -339,31 +246,10 @@ def wait_for_download_url(session: requests.Session, job_id: str) -> str:
         if download_url:
             return download_url
 
-        status = str(data.get("status") or data.get("state") or "").lower()
-        error_message = (
-            data.get("errorMessage")
-            or data.get("message")
-            or data.get("error")
-            or data.get("stackTrace")
-        )
-
-        if status in {"failed", "failure", "error", "cancelled", "canceled"} or error_message:
-            raise RuntimeError(
-                "Export job failed. "
-                f"job_id={job_id}, status={status or 'unknown'}, response={json.dumps(data, ensure_ascii=False)[:4000]}"
-            )
-
-        if time.time() - start_time > max_wait_seconds:
-            raise TimeoutError(
-                f"Export job timeout sau {max_wait_seconds}s. "
-                f"job_id={job_id}, last_response={json.dumps(data, ensure_ascii=False)[:4000]}"
-            )
-
         time.sleep(5)
 
 
 def download_export_file(session: requests.Session, download_url: str) -> Path:
-    print_current_jsessionid(session, "before download export file")
     resp = session.get(download_url, timeout=120)
     print(f"Download status: {resp.status_code}")
     resp.raise_for_status()
@@ -473,15 +359,11 @@ def send_handover_email(
 
 
 def run():
-    args = parse_cli_args()
-    report_url = validate_report_url(args.report_url)
-    access_token = get_confluence_access_token()
-    confluence_cookie = get_optional_confluence_cookie(args)
+    report_url, jsessionid = login_sso_and_get_session_info()
     page_id = parse_page_id(report_url)
 
-    session = create_requests_session(access_token, confluence_cookie)
+    session = create_requests_session(jsessionid)
 
-    warmup_confluence_session(session, report_url)
     html = fetch_report_html(session, report_url)
     report_title, prev_staffs_vec, curr_staffs_vec = extract_staffs_from_html(html)
 
@@ -499,7 +381,7 @@ def run():
     if not isinstance(receivers, list):
         raise ValueError("mail_to trong config.json phải là list")
 
-    job_id = start_export_job(session, page_id, report_url)
+    job_id = start_export_job(session, page_id)
     download_url = wait_for_download_url(session, job_id)
     file_path = download_export_file(session, download_url)
 
