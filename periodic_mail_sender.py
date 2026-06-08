@@ -9,9 +9,6 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.edge.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
 from datetime import datetime, timedelta, timezone
 
 
@@ -53,56 +50,44 @@ def parse_page_id(report_url: str) -> str:
     return page_ids[0]
 
 
-def create_requests_session(jsessionid: str) -> requests.Session:
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
-    session.cookies.set("JSESSIONID", jsessionid)
-    return session
+def get_confluence_access_token() -> str:
+    token = (
+        CONFIG.get("confluence_access_token")
+        or CONFIG.get("baocaoca_access_token")
+        or CONFIG.get("access_token")
+    )
+    if not token or not str(token).strip():
+        raise ValueError(
+            "Thiếu access token trong config.json. "
+            "Hãy cấu hình confluence_access_token."
+        )
+    return str(token).strip()
 
 
-def create_edge_driver():
-    options = Options()
-    options.add_argument("--log-level=3")
-    options.add_experimental_option("excludeSwitches", ["enable-logging"])
-    return webdriver.Edge(options=options)
-
-
-def login_sso_and_get_session_info() -> tuple[str, str]:
-    driver = create_edge_driver()
-    try:
-        start_url = CONFIG.get("baocaoca_start_url", "").strip()
-        if not start_url:
-            raise ValueError("Thiếu baocaoca_start_url trong config.json")
-
-        driver.get(start_url)
-
-        print("Cửa sổ Edge đã mở.")
-        print("Vui lòng đăng nhập SSO trên cửa sổ này, sau đó truy cập trang báo cáo cần export.")
-        input("Khi đã mở đúng trang báo cáo, nhấn Enter để tiếp tục ...")
-
-        report_url = driver.current_url
-        if not report_url or "pageId=" not in report_url:
-            raise ValueError(
-                f"URL hiện tại không hợp lệ hoặc không chứa pageId: {report_url}"
-            )
-
-        WebDriverWait(driver, 30).until(
-            lambda d: d.get_cookie("JSESSIONID") is not None
-            or d.get_cookie("jsessionid") is not None
+def get_report_url_from_args() -> str:
+    if len(sys.argv) < 2 or not sys.argv[1].strip():
+        raise ValueError(
+            "Thiếu URL báo cáo. Cách chạy: "
+            'python script.py "https://confluence.example.com/pages/viewpage.action?pageId=123456"'
         )
 
-        cookie = driver.get_cookie("JSESSIONID") or driver.get_cookie("jsessionid")
-        if not cookie or "value" not in cookie:
-            raise ValueError("Không lấy được JSESSIONID sau khi đăng nhập SSO.")
+    report_url = sys.argv[1].strip()
+    if "pageId=" not in report_url:
+        raise ValueError(f"URL báo cáo không hợp lệ hoặc không chứa pageId: {report_url}")
 
-        jsessionid = cookie["value"]
+    return report_url
 
-        print(f"Current report URL: {report_url}")
 
-        return report_url, jsessionid
+def create_requests_session(access_token: str) -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Authorization": f"Bearer {access_token}",
+        }
+    )
+    return session
 
-    finally:
-        driver.quit()
 
 
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
@@ -359,10 +344,11 @@ def send_handover_email(
 
 
 def run():
-    report_url, jsessionid = login_sso_and_get_session_info()
+    report_url = get_report_url_from_args()
+    access_token = get_confluence_access_token()
     page_id = parse_page_id(report_url)
 
-    session = create_requests_session(jsessionid)
+    session = create_requests_session(access_token)
 
     html = fetch_report_html(session, report_url)
     report_title, prev_staffs_vec, curr_staffs_vec = extract_staffs_from_html(html)
