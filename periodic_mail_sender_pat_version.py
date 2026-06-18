@@ -1,12 +1,6 @@
 import json
 import sys
-<<<<<<< HEAD
 import smtplib
-=======
-import time
-import smtplib
-import os
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
 import requests
 import argparse
 
@@ -30,17 +24,7 @@ EXPORT_VARIANT_ID = "7F0000010175551BAE4736E652E83540"
 
 DOWNLOAD_DIR = Path("../bao-cao-ca")
 
-# =========================
-<<<<<<< HEAD
-# 🔥 HARD CODE PAT
-# =========================
-CONFLUENCE_PAT = ""
-=======
-# 🔥 HARD CODE PAT HERE
-# =========================
-CONFLUENCE_PAT = "PASTE_YOUR_PAT_HERE"
 
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
 
 # =========================
 # CONFIG
@@ -71,22 +55,13 @@ def create_pat_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({
         "User-Agent": USER_AGENT,
-<<<<<<< HEAD
         "Authorization": f"Bearer {CONFLUENCE_PAT}"
-=======
-        "Authorization": f"Bearer {CONFLUENCE_PAT}",
-        "Content-Type": "application/json"
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
     })
     return session
 
 
 # =========================
-<<<<<<< HEAD
 # FETCH HTML (giữ nguyên)
-=======
-# FETCH HTML
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
 # =========================
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
     resp = session.get(report_url, timeout=60)
@@ -135,7 +110,6 @@ def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
 
 
 # =========================
-<<<<<<< HEAD
 # 🔥 EXPORT-SYNC (NEW CORE)
 # =========================
 def export_sync(session: requests.Session, report_url: str, page_id: str) -> Path:
@@ -150,75 +124,10 @@ def export_sync(session: requests.Session, report_url: str, page_id: str) -> Pat
     }
 
     resp = session.get(base_url + "/public/1/export-sync", params=params, timeout=300, stream=True)
-=======
-# EXPORT PAYLOAD
-# =========================
-def build_export_payload(page_id: str) -> dict:
-    return {
-        "pageId": page_id,
-        "pageSet": "descendants",
-        "templateId": EXPORT_TEMPLATE_ID,
-        "properties": {
-            "labels": {
-                "includeContentWithLabels": [],
-                "excludeContentWithLabels": [],
-                "indexTerms": []
-            },
-            "content": {
-                "links": [
-                    "enableExternalLinks",
-                    "enableConfluenceLinks"
-                ],
-                "images": "fullResolution",
-                "advanced": [
-                    "enableHeadingPromotion"
-                ]
-            },
-            "macros": {
-                "macros": [
-                    "showTocOutput",
-                    "showChildrenOutput"
-                ]
-            },
-            "title": {
-                "figure": "after",
-                "table": "after"
-            },
-            "printOptions": {
-                "artifactFileName": "Confluence-Export"
-            },
-            "locale": {
-                "defaultLocale": "en"
-            },
-            "tables": {
-                "tableFit": "AUTO_FIT_TO_WINDOW"
-            }
-        },
-        "pageOptions": {
-            "variantId": EXPORT_VARIANT_ID
-        },
-        "locale": "en-US",
-        "debugMode": False
-    }
-
-
-# =========================
-# EXPORT FLOW
-# =========================
-def start_export_job(session: requests.Session, export_api_url: str, page_id: str) -> str:
-    payload = build_export_payload(page_id)
-
-    resp = session.post(
-        export_api_url,
-        json=payload,
-        timeout=60
-    )
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
 
     print(f"Export status: {resp.status_code}")
     resp.raise_for_status()
 
-<<<<<<< HEAD
     filename = "report.docx"
     content_disposition = resp.headers.get("Content-Disposition")
 
@@ -226,48 +135,14 @@ def start_export_job(session: requests.Session, export_api_url: str, page_id: st
         filename = content_disposition.split("filename=")[-1].strip().replace('"', '')
     else:
         filename = f"{page_id}.docx"
-=======
-    data = resp.json()
-    job_id = data.get("exportJobId")
-
-    if not job_id:
-        raise ValueError(f"Missing exportJobId: {data}")
-
-    return job_id
-
-
-def wait_for_download_url(session: requests.Session, export_api_url: str, job_id: str) -> str:
-    status_url = f"{export_api_url}/{job_id}/status"
-
-    while True:
-        resp = session.get(status_url, timeout=60)
-        resp.raise_for_status()
-
-        data = resp.json()
-        if data.get("downloadUrl"):
-            return data["downloadUrl"]
-
-        time.sleep(5)
-
-
-def download_export_file(session: requests.Session, download_url: str) -> Path:
-    resp = session.get(download_url, timeout=120)
-    resp.raise_for_status()
-
-    filename = unquote(download_url.split("/")[-1]) or "output.docx"
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     file_path = DOWNLOAD_DIR / filename
 
-<<<<<<< HEAD
     with open(file_path, "wb") as f:
         for chunk in resp.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
-=======
-    file_path.write_bytes(resp.content)
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
 
     return file_path
 
@@ -335,19 +210,11 @@ def send_email(msg: EmailMessage):
 # MAIN
 # =========================
 def run(report_url: str):
-<<<<<<< HEAD
-=======
-    export_api_url = CONFIG["baocaoca_export_api_url"]
-
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
     page_id = parse_page_id(report_url)
 
     session = create_pat_session()
 
-<<<<<<< HEAD
     # 1. fetch html (giữ lại để parse staff)
-=======
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
     html = fetch_report_html(session, report_url)
     report_title, prev_vec, curr_vec = extract_staffs_from_html(html)
 
@@ -356,21 +223,12 @@ def run(report_url: str):
 
     sender_fullname = resolve_sender_fullname(curr_vec)
 
-<<<<<<< HEAD
     # 2. EXPORT (NEW SIMPLE FLOW)
     file_path = export_sync(session, report_url, page_id)
 
     print(f"Downloaded: {file_path}")
 
     # 3. EMAIL
-=======
-    job_id = start_export_job(session, export_api_url, page_id)
-    download_url = wait_for_download_url(session, export_api_url, job_id)
-    file_path = download_export_file(session, download_url)
-
-    print(f"Downloaded: {file_path}")
-
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
     msg = build_email_message(
         prev_staffs,
         curr_staffs,
@@ -386,23 +244,12 @@ def run(report_url: str):
     print("DONE")
 
 
-<<<<<<< HEAD
 # =========================
 # CLI
 # =========================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("url", help="Confluence page URL")
-=======
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "url",
-        help="Confluence page URL"
-    )
-
->>>>>>> f55d3c60b5dd1eef7afdc4bbfae25c28e6924fd4
     args = parser.parse_args()
 
     try:
