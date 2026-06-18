@@ -6,9 +6,9 @@ import argparse
 
 from email.message import EmailMessage
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 
 
 BANGKOK_TZ = timezone(timedelta(hours=7))
@@ -24,10 +24,8 @@ EXPORT_VARIANT_ID = "7F0000010175551BAE4736E652E83540"
 
 DOWNLOAD_DIR = Path("../bao-cao-ca")
 
-# =========================
-# 🔥 HARD CODE PAT
-# =========================
-CONFLUENCE_PAT = ""
+
+
 
 # =========================
 # CONFIG
@@ -49,8 +47,10 @@ def parse_page_id(report_url: str) -> str:
     parsed = urlparse(report_url)
     query = parse_qs(parsed.query)
     page_ids = query.get("pageId")
+
     if not page_ids:
-        raise ValueError("Missing pageId trong URL")
+        raise ValueError("Missing pageId in URL")
+
     return page_ids[0]
 
 
@@ -64,7 +64,7 @@ def create_pat_session() -> requests.Session:
 
 
 # =========================
-# FETCH HTML (giữ nguyên)
+# FETCH HTML
 # =========================
 def fetch_report_html(session: requests.Session, report_url: str) -> str:
     resp = session.get(report_url, timeout=60)
@@ -83,11 +83,11 @@ def extract_staffs_from_html(html: str):
 
     main_div = soup.select_one("div#main-content")
     if not main_div:
-        raise ValueError("Không tìm thấy div#main-content")
+        raise ValueError("Missing div#main-content")
 
     p_nodes = main_div.find_all("p", recursive=False)
     if len(p_nodes) < 2:
-        raise ValueError("Không tìm thấy đủ 2 thẻ <p>")
+        raise ValueError("Not enough <p> tags")
 
     def get_usernames(p_tag):
         return [
@@ -109,14 +109,16 @@ def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
         if username in sender_map:
             return sender_map[username]
 
-    raise ValueError("Không tìm thấy sender mapping")
+    raise ValueError("No sender mapping found")
 
 
 # =========================
-# 🔥 EXPORT-SYNC (NEW CORE)
+# EXPORT SYNC (CORE)
 # =========================
-def export_sync(session: requests.Session, report_url: str, page_id: str) -> Path:
+def export_sync(session: requests.Session, page_id: str) -> Path:
     base_url = CONFIG["baocaoca_export_api_url"]
+
+    url = base_url + "/public/1/export-sync"
 
     params = {
         "templateId": EXPORT_TEMPLATE_ID,
@@ -126,18 +128,16 @@ def export_sync(session: requests.Session, report_url: str, page_id: str) -> Pat
         "locale": "en-US"
     }
 
-    resp = session.get(base_url + "/public/1/export-sync", params=params, timeout=300, stream=True)
+    resp = session.get(url, params=params, timeout=300, stream=True)
 
     print(f"Export status: {resp.status_code}")
     resp.raise_for_status()
 
-    filename = "report.docx"
-    content_disposition = resp.headers.get("Content-Disposition")
+    filename = f"{page_id}.docx"
 
-    if content_disposition and "filename=" in content_disposition:
-        filename = content_disposition.split("filename=")[-1].strip().replace('"', '')
-    else:
-        filename = f"{page_id}.docx"
+    cd = resp.headers.get("Content-Disposition")
+    if cd and "filename=" in cd:
+        filename = cd.split("filename=")[-1].replace('"', '').strip()
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     file_path = DOWNLOAD_DIR / filename
@@ -153,53 +153,6 @@ def export_sync(session: requests.Session, report_url: str, page_id: str) -> Pat
 # =========================
 # EMAIL
 # =========================
-def build_email_message(
-    prev_staffs: str,
-    curr_staffs: str,
-    sender_fullname: str,
-    report_title: str,
-    report_url: str,
-    file_path: Path,
-    receivers: list[str],
-) -> EmailMessage:
-
-    subject = "Báo cáo bàn giao"
-
-    body_html = f"""
-    <p>Dear các anh,</p>
-
-    <p>Em gửi báo cáo bàn giao.</p>
-
-    <p>
-        Người bàn giao: {prev_staffs}<br>
-        Người nhận: {curr_staffs}<br>
-        Report: <a href="{report_url}">{report_title}</a>
-    </p>
-
-    <p>
-        Regards,<br>
-        <b>{sender_fullname}</b>
-    </p>
-    """
-
-    msg = EmailMessage()
-    msg["From"] = f"{sender_fullname} <{CONFIG['mail_from']}>"
-    msg["To"] = ", ".join(receivers)
-    msg["Subject"] = subject
-
-    msg.set_content("HTML email")
-    msg.add_alternative(body_html, subtype="html")
-
-    msg.add_attachment(
-        file_path.read_bytes(),
-        maintype="application",
-        subtype="octet-stream",
-        filename=file_path.name
-    )
-
-    return msg
-
-
 def send_email(msg: EmailMessage):
     with smtplib.SMTP_SSL(CONFIG["smtp_host"], 465) as server:
         server.login(
@@ -210,14 +163,13 @@ def send_email(msg: EmailMessage):
 
 
 # =========================
-# MAIN
+# MAIN FLOW
 # =========================
 def run(report_url: str):
     page_id = parse_page_id(report_url)
 
     session = create_pat_session()
 
-    # 1. fetch html (giữ lại để parse staff)
     html = fetch_report_html(session, report_url)
     report_title, prev_vec, curr_vec = extract_staffs_from_html(html)
 
@@ -226,20 +178,30 @@ def run(report_url: str):
 
     sender_fullname = resolve_sender_fullname(curr_vec)
 
-    # 2. EXPORT (NEW SIMPLE FLOW)
-    file_path = export_sync(session, report_url, page_id)
+    file_path = export_sync(session, page_id)
 
     print(f"Downloaded: {file_path}")
 
-    # 3. EMAIL
-    msg = build_email_message(
-        prev_staffs,
-        curr_staffs,
-        sender_fullname,
-        report_title,
-        report_url,
-        file_path,
-        CONFIG["mail_to"]
+    msg = EmailMessage()
+    msg["From"] = f"{sender_fullname} <{CONFIG['mail_from']}>"
+    msg["To"] = ", ".join(CONFIG["mail_to"])
+    msg["Subject"] = "Báo cáo bàn giao"
+
+    body = f"""
+    <p>Report: {report_title}</p>
+    <p>From: {prev_staffs}</p>
+    <p>To: {curr_staffs}</p>
+    <p>Link: {report_url}</p>
+    """
+
+    msg.set_content("HTML email")
+    msg.add_alternative(body, subtype="html")
+
+    msg.add_attachment(
+        file_path.read_bytes(),
+        maintype="application",
+        subtype="octet-stream",
+        filename=file_path.name
     )
 
     send_email(msg)
@@ -248,11 +210,12 @@ def run(report_url: str):
 
 
 # =========================
-# CLI
+# CLI ENTRY
 # =========================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("url", help="Confluence page URL")
+    parser.add_argument("url", help="Confluence page URL from user")
+
     args = parser.parse_args()
 
     try:
