@@ -4,6 +4,7 @@ import time
 import smtplib
 import os
 import requests
+import argparse
 
 from email.message import EmailMessage
 from pathlib import Path
@@ -281,8 +282,7 @@ def send_email(msg: EmailMessage):
 # =========================
 # MAIN
 # =========================
-def run():
-    report_url = CONFIG["report_url"]
+def run(report_url: str):
     export_api_url = CONFIG["baocaoca_export_api_url"]
 
     page_id = parse_page_id(report_url)
@@ -319,8 +319,17 @@ def run():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "url",
+        help="Confluence page URL"
+    )
+
+    args = parser.parse_args()
+
     try:
-        run()
+        run(args.url)
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
