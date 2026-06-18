@@ -24,7 +24,10 @@ EXPORT_VARIANT_ID = "7F0000010175551BAE4736E652E83540"
 
 DOWNLOAD_DIR = Path("../bao-cao-ca")
 
-
+# =========================
+# 🔥 HARD CODE PAT
+# =========================
+CONFLUENCE_PAT = ""
 
 # =========================
 # CONFIG
