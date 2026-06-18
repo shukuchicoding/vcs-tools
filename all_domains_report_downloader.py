@@ -12,7 +12,7 @@ import requests
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
-
+import os
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -166,6 +166,7 @@ class AuthenticatedSession:
 
     def _create_driver(self):
         try:
+            os.environ["SE_TIMEOUT"] = "900"
             return webdriver.Edge(options=self._build_edge_options())
         except Exception as exc:
             mode = f"proxy '{self.proxy}'" if self.proxy else "không dùng proxy"
