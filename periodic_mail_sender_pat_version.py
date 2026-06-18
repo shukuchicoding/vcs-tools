@@ -3,7 +3,8 @@ import sys
 import smtplib
 import requests
 import argparse
-
+import re
+from urllib.parse import unquote
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -115,9 +116,33 @@ def resolve_sender_fullname(curr_staffs_vec: list[str]) -> str:
 # =========================
 # EXPORT SYNC (CORE)
 # =========================
+# Windows không cho phép các ký tự này trong tên file
+_INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*]')
+
+def _parse_content_disposition_filename(cd: str) -> str | None:
+    if not cd:
+        return None
+
+    # Ưu tiên filename* (RFC 5987, UTF-8 percent-encoded) — xử lý đúng cả tên có unicode
+    match = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", cd, re.IGNORECASE)
+    if match:
+        return unquote(match.group(1).strip())
+
+    # Fallback: filename="..."
+    match = re.search(r'filename\s*=\s*"([^"]+)"', cd, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: filename=... (không có quote)
+    match = re.search(r"filename\s*=\s*([^;]+)", cd, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip('"')
+
+    return None
+
+
 def export_sync(session: requests.Session, page_id: str) -> Path:
     base_url = CONFIG["baocaoca_export_api_url"]
-
     url = base_url + "/public/1/export-sync"
 
     params = {
@@ -129,15 +154,15 @@ def export_sync(session: requests.Session, page_id: str) -> Path:
     }
 
     resp = session.get(url, params=params, timeout=300, stream=True)
-
     print(f"Export status: {resp.status_code}")
     resp.raise_for_status()
 
     filename = f"{page_id}.docx"
-
     cd = resp.headers.get("Content-Disposition")
-    if cd and "filename=" in cd:
-        filename = cd.split("filename=")[-1].replace('"', '').strip()
+    parsed_name = _parse_content_disposition_filename(cd) if cd else None
+    if parsed_name:
+        # Sanitize phòng trường hợp server trả thêm ký tự không hợp lệ với filesystem
+        filename = _INVALID_FS_CHARS.sub("_", parsed_name)
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     file_path = DOWNLOAD_DIR / filename
