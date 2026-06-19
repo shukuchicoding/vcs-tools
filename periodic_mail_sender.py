@@ -241,21 +241,21 @@ def run(report_url: str):
     print(f"Downloaded: {file_path}")
 
     msg = EmailMessage()
-    msg["From"] = f"{sender_fullname} <{CONFIG['mail_from']}>"
+    msg["From"] = "NOC Cloudrity <{CONFIG['mail_from']}>"
     msg["To"] = ", ".join(CONFIG["mail_to"])
-    msg["Subject"] = "Báo cáo bàn giao"
+    msg["Subject"] = "Báo cáo FO 247 ca {x} ngày {y}"
 
     body = f"""
     <p>Dear các anh,</p>
     <p>Em gửi báo cáo trực ca {x} ngày {y}.</p>
-    <p>Người bàn giao: {prev_staffs}</p>
-    <p>Người nhận bàn giao: {curr_staffs}</p>
+    Người bàn giao: {prev_staffs}<br>
+    Người nhận bàn giao: {curr_staffs}<br>
     <p>
         Biên bản bàn giao:
         <a href="{report_url}">{report_title}</a>
     </p>
-    <p>Best regards,</p>
-    <i>{sender_fullname}</i>
+    Best regards,<br>
+    <i>{sender_fullname}</i><br>
     ---
     """
 
