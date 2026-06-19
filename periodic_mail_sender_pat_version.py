@@ -63,6 +63,37 @@ def create_pat_session() -> requests.Session:
     })
     return session
 
+_TITLE_PATTERN = re.compile(
+    r"(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]+)\s+(?P<year>\d{4})\s*-\s*Ca\s*(?P<shift>\d+)",
+    re.IGNORECASE,
+)
+
+_MONTH_MAP = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+def parse_shift_and_date(report_title: str) -> tuple[str, str]:
+    """
+    Input ví dụ: "18 June 2026 - Ca 2 (19h00 - 07h00) - NOC_Compose - VCS Confluence"
+    Output: ("2", "18/06/2026")
+    """
+    match = _TITLE_PATTERN.search(report_title)
+    if not match:
+        raise ValueError(f"Không parse được ca/ngày từ title: {report_title!r}")
+
+    day = int(match.group("day"))
+    month_name = match.group("month").lower()
+    year = int(match.group("year"))
+    shift = match.group("shift")
+
+    month = _MONTH_MAP.get(month_name)
+    if month is None:
+        raise ValueError(f"Không nhận diện được tên tháng: {match.group('month')!r}")
+
+    formatted_date = f"{day:02d}/{month:02d}/{year}"
+    return shift, formatted_date
 
 # =========================
 # FETCH HTML
@@ -205,6 +236,8 @@ def run(report_url: str):
 
     file_path = export_sync(session, page_id)
 
+    x, y = parse_shift_and_date(report_title)
+
     print(f"Downloaded: {file_path}")
 
     msg = EmailMessage()
@@ -213,10 +246,17 @@ def run(report_url: str):
     msg["Subject"] = "Báo cáo bàn giao"
 
     body = f"""
-    <p>Report: {report_title}</p>
-    <p>From: {prev_staffs}</p>
-    <p>To: {curr_staffs}</p>
-    <p>Link: {report_url}</p>
+    <p>Dear các anh,</p>
+    <p>Em gửi báo cáo trực ca {x} ngày {y}.</p>
+    <p>Người bàn giao: {prev_staffs}</p>
+    <p>Người nhận bàn giao: {curr_staffs}</p>
+    <p>
+        Biên bản bàn giao:
+        <a href="{report_url}">{report_title}</a>
+    </p>
+    <p>Best regards,</p>
+    <i>{sender_fullname}</i>
+    ---
     """
 
     msg.set_content("HTML email")
